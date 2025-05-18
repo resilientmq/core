@@ -5,7 +5,7 @@ import {
 } from "@resilientmq/types__core";
 import { ResilientEventConsumeProcessor } from "./resilient-event-consume-processor";
 import { AmqpQueue } from "../broker/amqp-queue";
-import { log } from "../logger/log";
+import { log } from "../logger/logger";
 
 export class ResilientConsumer {
     private processor!: ResilientEventConsumeProcessor;
@@ -24,7 +24,6 @@ export class ResilientConsumer {
         this.queue = new AmqpQueue(this.config.connection);
         await this.queue.connect(this.config.prefetch ?? 1);
 
-        // Setup consume queue
         const { queue: consumeQueue, options, exchange } = this.config.consumeQueue;
         if (exchange) {
             await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
@@ -56,7 +55,6 @@ export class ResilientConsumer {
             });
         }
 
-        // Dead-letter queue
         if (this.config.deadLetterQueue) {
             const { queue, exchange, options } = this.config.deadLetterQueue;
             if (exchange) {
@@ -71,12 +69,12 @@ export class ResilientConsumer {
         } as RabbitMQResilientProcessorConfig);
 
         await this.queue.consume(consumeQueue, (event: EventMessage) =>
-            this.processor.process(event, consumeQueue)
+            this.processor.process(event)
         );
 
         if (this.config.retryQueue?.queue) {
             await this.queue.consume(this.config.retryQueue.queue, (event: EventMessage) =>
-                this.processor.process(event, this.config.retryQueue!.queue)
+                this.processor.process(event)
             );
         }
 
