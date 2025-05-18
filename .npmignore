@@ -5,9 +5,9 @@
 test/
 *.test-d.ts
 
-# Local build & logs
+# Local files & logs
 node_modules/
-dist/
+src/
 coverage/
 *.log
 
