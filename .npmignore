@@ -1,0 +1,19 @@
+# GitHub CI
+.github/
+
+# Tests
+test/
+*.test-d.ts
+
+# Local build & logs
+node_modules/
+dist/
+coverage/
+*.log
+
+# Other configs
+tsconfig.json
+tsconfig.*.json
+.vscode/
+.env
+.DS_Store
