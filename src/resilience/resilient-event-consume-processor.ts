@@ -73,7 +73,7 @@ export class ResilientEventConsumeProcessor {
                 }
             };
 
-            if (attempts + 1 >= maxAttempts) {
+            if (!maxAttempts || attempts + 1 >= maxAttempts) {
                 await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
                 await handleDLQ({
                     queue: this.config.consumeQueue.queue,
