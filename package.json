@@ -38,7 +38,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "@resilientmq/types__core": "^0.1.2",
+    "@resilientmq/types__core": "^0.1.4",
     "amqplib": "^0.10.8"
   }
 }
