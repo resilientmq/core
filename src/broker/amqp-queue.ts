@@ -1,6 +1,6 @@
 import amqplib, {Channel, ChannelModel, Options} from 'amqplib';
 import {log} from '../logger/logger';
-import {EventMessage, MessageQueue, PublishOptions} from "../../types";
+import {EventMessage, MessageQueue, PublishOptions} from "../types";
 
 /**
  * AMQP-compliant implementation of the MessageQueue interface.

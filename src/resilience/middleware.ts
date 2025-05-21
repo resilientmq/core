@@ -1,4 +1,4 @@
-import {EventMessage, Middleware} from "../../types";
+import {EventMessage, Middleware} from "../types";
 
 export function applyMiddleware(
     middlewares: Middleware[],

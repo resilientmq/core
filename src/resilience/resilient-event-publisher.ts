@@ -1,6 +1,6 @@
 import { AmqpQueue } from '../broker/amqp-queue';
 import { log } from '../logger/logger';
-import {EventMessage, EventPublishStatus, ResilientPublisherConfig} from "../../types";
+import {EventMessage, EventPublishStatus, ResilientPublisherConfig} from "../types";
 
 /**
  * Handles publishing of events with retry and dead-letter support.

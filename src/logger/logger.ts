@@ -1,4 +1,4 @@
-import {LogLevel} from "../../types";
+import {LogLevel} from "../types";
 
 /**
  * Internal state for current log level.

@@ -1,4 +1,4 @@
-import {EventMessage, ExchangeConfig, MessageQueue} from "../../types";
+import {EventMessage, ExchangeConfig, MessageQueue} from "../types";
 
 export async function handleDLQ(
     dlq:
