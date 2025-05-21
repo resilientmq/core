@@ -1,6 +1,6 @@
 import amqplib, {Channel, ChannelModel, Options} from 'amqplib';
 import {log} from '../logger/logger';
-import {EventMessage, MessageQueue, PublishOptions} from "../types";
+import {EventConsumeStatus, EventMessage, MessageQueue, PublishOptions} from "../types";
 
 /**
  * AMQP-compliant implementation of the MessageQueue interface.
@@ -86,6 +86,7 @@ export class AmqpQueue implements MessageQueue {
                     messageId: msg.properties.messageId,
                     type: msg.properties.type,
                     payload,
+                    status: EventConsumeStatus.RECEIVED,
                     properties: msg.properties,
                 });
 

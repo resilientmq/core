@@ -94,7 +94,7 @@ export type EventMessage<T = any> = {
     /**
      * The current lifecycle status of the event.
      */
-    status?: string;
+    status: string;
 
     /**
      * Additional message properties relevant to AMQP delivery.
