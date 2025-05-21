@@ -1,4 +1,4 @@
-import {LogLevel} from "@resilientmq/types__core";
+import {LogLevel} from "../../types";
 
 /**
  * Internal state for current log level.

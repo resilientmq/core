@@ -1,4 +1,4 @@
-import type { EventMessage, Middleware } from "@resilientmq/types__core";
+import {EventMessage, Middleware} from "../../types";
 
 export function applyMiddleware(
     middlewares: Middleware[],

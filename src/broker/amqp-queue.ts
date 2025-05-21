@@ -1,6 +1,6 @@
-import amqplib, { Channel, ChannelModel, Options } from 'amqplib';
-import type {EventMessage, MessageQueue, PublishOptions} from '@resilientmq/types__core';
-import { log } from '../logger/logger';
+import amqplib, {Channel, ChannelModel, Options} from 'amqplib';
+import {log} from '../logger/logger';
+import {EventMessage, MessageQueue, PublishOptions} from "../../types";
 
 /**
  * AMQP-compliant implementation of the MessageQueue interface.
@@ -10,10 +10,11 @@ export class AmqpQueue implements MessageQueue {
     private _connection!: ChannelModel;
     private _channel!: Channel;
     private _prefetchCount = 1;
-    private consumerTags: Map<string, string> = new Map();
+    private readonly consumerTags: Map<string, string> = new Map();
     public closed = false;
 
-    constructor(private readonly connConfig: string | Options.Connect) {}
+    constructor(private readonly connConfig: string | Options.Connect) {
+    }
 
     /** Returns the current AMQP connection. */
     get connection(): ChannelModel {
@@ -55,14 +56,14 @@ export class AmqpQueue implements MessageQueue {
      */
     async publish(destination: string, event: EventMessage, options?: PublishOptions): Promise<void> {
         const content = Buffer.from(JSON.stringify(event));
-        const props = options?.properties ?? { persistent: true };
+        const props = options?.properties ?? {persistent: true};
 
         if (options?.exchange) {
-            const { name, type, routingKey = '', options: exchangeOptions } = options.exchange;
+            const {name, type, routingKey = '', options: exchangeOptions} = options.exchange;
             await this._channel.assertExchange(name, type, exchangeOptions);
             this._channel.publish(name, routingKey, content, props);
         } else {
-            await this._channel.assertQueue(destination, { durable: true });
+            await this._channel.assertQueue(destination, {durable: true});
             this._channel.sendToQueue(destination, content, props);
         }
     }
@@ -76,7 +77,7 @@ export class AmqpQueue implements MessageQueue {
     async consume(queue: string, onMessage: (event: EventMessage) => Promise<void>): Promise<void> {
         await this._channel.checkQueue(queue);
 
-        const { consumerTag } = await this._channel.consume(queue, async (msg) => {
+        const {consumerTag} = await this._channel.consume(queue, async (msg) => {
             if (!msg) return;
 
             try {

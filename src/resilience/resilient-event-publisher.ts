@@ -1,12 +1,12 @@
-import { EventPublishStatus, ResilientPublisherConfig, EventMessage } from "@resilientmq/types__core";
 import { AmqpQueue } from '../broker/amqp-queue';
 import { log } from '../logger/logger';
+import {EventMessage, EventPublishStatus, ResilientPublisherConfig} from "../../types";
 
 /**
  * Handles publishing of events with retry and dead-letter support.
  */
 export class ResilientEventPublisher {
-    private queue: AmqpQueue;
+    private readonly queue: AmqpQueue;
 
     constructor(private readonly config: ResilientPublisherConfig) {
         this.queue = new AmqpQueue(this.config.connection);

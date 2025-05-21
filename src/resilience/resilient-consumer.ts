@@ -1,11 +1,7 @@
-import {
-    EventMessage,
-    RabbitMQResilientProcessorConfig,
-    ResilientConsumerConfig
-} from "@resilientmq/types__core";
 import { ResilientEventConsumeProcessor } from "./resilient-event-consume-processor";
 import { AmqpQueue } from "../broker/amqp-queue";
 import { log } from "../logger/logger";
+import {EventMessage, RabbitMQResilientProcessorConfig, ResilientConsumerConfig} from "../../types";
 
 export class ResilientConsumer {
     private processor!: ResilientEventConsumeProcessor;

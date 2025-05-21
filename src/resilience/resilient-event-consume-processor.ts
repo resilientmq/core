@@ -1,11 +1,7 @@
-import {
-    EventMessage,
-    EventConsumeStatus,
-    RabbitMQResilientProcessorConfig
-} from "@resilientmq/types__core";
 import { handleDLQ } from './dlq-handler';
 import { applyMiddleware } from './middleware';
 import { log } from '../logger/logger';
+import {EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig} from "../../types";
 
 /**
  * Handles the lifecycle of consuming events, including retries, deduplication, and DLQ routing.

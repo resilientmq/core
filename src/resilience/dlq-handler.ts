@@ -1,4 +1,4 @@
-import type {EventMessage, ExchangeConfig, MessageQueue} from "@resilientmq/types__core";
+import {EventMessage, ExchangeConfig, MessageQueue} from "../../types";
 
 export async function handleDLQ(
     dlq:
