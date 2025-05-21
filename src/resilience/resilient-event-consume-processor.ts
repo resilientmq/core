@@ -1,6 +1,6 @@
-import { handleDLQ } from './dlq-handler';
-import { applyMiddleware } from './middleware';
-import { log } from '../logger/logger';
+import {handleDLQ} from './dlq-handler';
+import {applyMiddleware} from './middleware';
+import {log} from '../logger/logger';
 import {EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig} from "../types";
 
 /**
@@ -34,6 +34,11 @@ export class ResilientEventConsumeProcessor {
             const match = this.config.eventsToProcess.find(e => e.type === event.type);
             if (!match) {
                 log('warn', `[Processor] No handler for event type: ${event.type}`);
+                if (!this.config.ignoreUnknownEvents) {
+                    await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
+                } else {
+                    await this.config.store.deleteEvent(event);
+                }
                 return;
             }
 
@@ -45,7 +50,7 @@ export class ResilientEventConsumeProcessor {
             };
 
             if (this.config.middleware?.length) {
-                await applyMiddleware(this.config.middleware, event, runner, );
+                await applyMiddleware(this.config.middleware, event, runner,);
             } else {
                 await runner();
             }
@@ -70,7 +75,10 @@ export class ResilientEventConsumeProcessor {
 
             if (attempts + 1 >= maxAttempts) {
                 await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
-                await handleDLQ({queue: this.config.consumeQueue.queue, exchange: this.config.consumeQueue.exchange},this.config.broker, updatedEvent);
+                await handleDLQ({
+                    queue: this.config.consumeQueue.queue,
+                    exchange: this.config.consumeQueue.exchange
+                }, this.config.broker, updatedEvent);
                 log('warn', `[Processor] Sent to DLQ after ${attempts + 1} attempts: ${event.messageId}`);
             } else if (this.config.retryQueue?.queue) {
                 await this.config.broker.publish(this.config.retryQueue.queue, updatedEvent, {

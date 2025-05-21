@@ -74,6 +74,11 @@ export type ResilientConsumerConfig = {
     connection: string | Options.Connect;
 
     /**
+     * This configuration enables or disables the option to ignore unknown events.
+     */
+    ignoreUnknownEvents?: boolean;
+
+    /**
      * Max allowed uptime before automatic reconnect (in ms).
      */
     maxUptimeMs?: number;
