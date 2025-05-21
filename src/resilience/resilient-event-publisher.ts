@@ -26,9 +26,9 @@ export class ResilientEventPublisher {
      */
     async publish(event: EventMessage): Promise<void> {
         try {
-            const existing = await this.config.store.getEvent(event.messageId);
+            const existing = await this.config.store.getEvent(event);
             if (existing) {
-                log('warn', `[Publisher] Duplicate message detected: ${event.messageId}`);
+                log('warn', `[Publisher] Duplicate message detected: ${event}`);
                 return;
             }
 
@@ -36,7 +36,7 @@ export class ResilientEventPublisher {
             await this.config.store.saveEvent(event);
 
             await this.queue.publish(
-                this.config.queue || this.config.exchange?.name!,
+                this.config.queue ?? this.config.exchange?.name!,
                 event,
                 {
                     exchange: this.config.exchange,
@@ -52,10 +52,10 @@ export class ResilientEventPublisher {
                 }
             );
 
-            await this.config.store.updateEventStatus(event.messageId, EventPublishStatus.PUBLISHED);
+            await this.config.store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
             log('info', `[Publisher] Message ${event.messageId} published`);
         } catch (error) {
-            await this.config.store.updateEventStatus(event.messageId, EventPublishStatus.ERROR);
+            await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
             log('error', `[Publisher] Failed to publish message ${event.messageId}`, error);
         }
     }

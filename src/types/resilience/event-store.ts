@@ -17,26 +17,26 @@ export interface EventStore {
     /**
      * Updates the status of an event, such as marking it as `DONE` or `RETRY`.
      *
-     * @param messageId - The message's unique ID.
+     * @param event - The event message containing the ID to search for.
      * @param status - The new status to assign to the event.
      */
     updateEventStatus(
-        messageId: string,
+        event: EventMessage,
         status: EventConsumeStatus | EventPublishStatus
     ): Promise<void>;
 
     /**
-     * Fetches an event based on its message ID.
+     * Fetches an event based on its message.
      *
-     * @param messageId - The ID of the event to retrieve.
+     * @param event - The event message containing the ID to search for.
      * @returns The found event or `null`.
      */
-    getEvent(messageId: string): Promise<EventMessage | null>;
+    getEvent(event: EventMessage): Promise<EventMessage | null>;
 
     /**
-     * Deletes a previously stored event by message ID.
+     * Deletes a previously stored event by message.
      *
-     * @param messageId - The ID of the event to delete.
+     * @param event - The event message containing the ID to search for.
      */
-    deleteEvent(messageId: string): Promise<void>;
+    deleteEvent(event: EventMessage): Promise<void>;
 }

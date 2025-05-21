@@ -11,9 +11,9 @@ export async function handleDLQ(
     event: EventMessage
 ) {
     if (dlq?.queue && dlq.exchange) {
-        console.warn(`[DLQ] Publishing event ${event.id} to DLQ ${dlq.queue}`);
+        console.warn(`[DLQ] Publishing event ${event.messageId} to DLQ ${dlq.queue}`);
         await broker.publish(dlq.queue, event, {exchange: dlq.exchange});
     } else {
-        console.warn(`[DLQ] Event ${event.id} discarded (DLQ not configured)`);
+        console.warn(`[DLQ] Event ${event.messageId} discarded (DLQ not configured)`);
     }
 }

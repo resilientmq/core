@@ -75,10 +75,6 @@ export type EventProperties = {
  * @typeParam T - The shape of the payload associated with the event.
  */
 export type EventMessage<T = any> = {
-    /**
-     * A globally unique identifier for the event.
-     */
-    id: string;
 
     /**
      * The message ID used in AMQP (optional, but helpful for tracing).
@@ -88,7 +84,7 @@ export type EventMessage<T = any> = {
     /**
      * The logical event type (e.g., 'order.created', 'user.deleted').
      */
-    type: string;
+    type?: string;
 
     /**
      * The actual data payload of the event.
@@ -98,7 +94,7 @@ export type EventMessage<T = any> = {
     /**
      * The current lifecycle status of the event.
      */
-    status: string;
+    status?: string;
 
     /**
      * Additional message properties relevant to AMQP delivery.

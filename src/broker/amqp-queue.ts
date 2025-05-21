@@ -81,8 +81,13 @@ export class AmqpQueue implements MessageQueue {
             if (!msg) return;
 
             try {
-                const event = JSON.parse(msg.content.toString());
-                await onMessage(event);
+                const payload = JSON.parse(msg.content.toString());
+                await onMessage({
+                    messageId: msg.properties.messageId,
+                    type: msg.properties.type,
+                    payload,
+                    properties: msg.properties,
+                });
 
                 const socket = (this._channel as any)?.connection?.stream;
                 if (socket?.writable) {
