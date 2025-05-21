@@ -1,7 +1,7 @@
 {
   "name": "@resilientmq/core",
-  "version": "0.1.6",
-  "main": "dist/index.js",
+  "version": "0.1.7",
+  "main": "index.js",
   "types": "types/index.d.ts",
   "description": "Core logic for resilient RabbitMQ event processing",
   "license": "MIT",
