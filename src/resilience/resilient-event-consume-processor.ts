@@ -15,14 +15,19 @@ export class ResilientEventConsumeProcessor {
 
     /**
      * Processes an event message, applying middleware, storing metadata, and invoking a handler.
-     * On error, it manages retries or forwards the message to a DLQ if necessary.
+     * On error, it manages to retries or forwards the message to a DLQ if necessary.
      *
      * @param event - The incoming event message from the queue.
      */
     async process(event: EventMessage): Promise<void> {
         try {
-            this.config.events?.onEventStart?.(event);
+            const control = {skipEvent: false};
+            this.config.events?.onEventStart?.(event, control);
 
+            if (control.skipEvent) {
+                log('info', `[Processor] Processing skipped by onEventStart for event ${event.messageId}`);
+                return;
+            }
             const existing = await this.config.store.getEvent(event);
             if (existing) {
                 log('warn', `[Processor] Duplicate event detected: ${event.messageId}`);

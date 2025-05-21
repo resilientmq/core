@@ -1,8 +1,8 @@
-import type { Options } from 'amqplib';
-import type { EventMessage } from './event-message';
-import { Middleware } from './middleware';
-import { EventStore } from './event-store';
-import { MessageQueue } from '../broker/message-queue';
+import type {Options} from 'amqplib';
+import type {EventMessage} from './event-message';
+import {Middleware} from './middleware';
+import {EventStore} from './event-store';
+import {MessageQueue} from '../broker/message-queue';
 
 /**
  * Describes a RabbitMQ exchange to be used for binding or publishing.
@@ -174,6 +174,11 @@ export type EventProcessConfig<T = any> = {
     handler: (payload: T) => Promise<void>;
 };
 
+
+export type EventControl = {
+    skipEvent: boolean;
+}
+
 /**
  * Hook callbacks triggered at various stages of event lifecycle.
  */
@@ -181,7 +186,7 @@ export type ResilientEventHooks = {
     /**
      * Invoked before processing starts.
      */
-    onEventStart?: (event: EventMessage) => void;
+    onEventStart?: (event: EventMessage, control: EventControl)  => void;
 
     /**
      * Invoked after successful processing.
