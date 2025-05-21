@@ -25,6 +25,13 @@ jobs:
       - name: Build project
         run: npm run build
 
+      # Move compiled code from dist to root and remove dist
+      - name: Move compiled code and clean up dist
+        run: |
+          # Move the content of 'dist' outside and delete the 'dist' folder
+          mv dist/* ./
+          rm -rf dist
+
       - name: Get current version
         id: current
         run: |
