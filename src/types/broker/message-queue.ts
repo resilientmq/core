@@ -12,10 +12,6 @@ export interface PublishOptions {
      */
     exchange?: ExchangeConfig;
 
-    /**
-     * AMQP message properties (headers, persistence, correlationId, etc.).
-     */
-    properties?: Options.Publish;
 }
 
 /**

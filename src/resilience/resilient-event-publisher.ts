@@ -39,16 +39,7 @@ export class ResilientEventPublisher {
                 this.config.queue ?? this.config.exchange?.name!,
                 event,
                 {
-                    exchange: this.config.exchange,
-                    properties: {
-                        messageId: event.messageId,
-                        timestamp: Date.now(),
-                        contentType: 'application/json',
-                        headers: {
-                            'x-attempts': 0
-                        },
-                        persistent: true
-                    }
+                    exchange: this.config.exchange
                 }
             );
 

@@ -56,7 +56,7 @@ export class AmqpQueue implements MessageQueue {
      */
     async publish(destination: string, event: EventMessage, options?: PublishOptions): Promise<void> {
         const content = Buffer.from(JSON.stringify(event));
-        const props = options?.properties ?? {persistent: true};
+        const props = event.properties ?? {persistent: true};
 
         if (options?.exchange) {
             const {name, type, routingKey = '', options: exchangeOptions} = options.exchange;

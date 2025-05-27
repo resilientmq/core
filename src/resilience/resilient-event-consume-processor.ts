@@ -1,7 +1,7 @@
-import {handleDLQ} from './dlq-handler';
-import {applyMiddleware} from './middleware';
-import {log} from '../logger/logger';
-import {EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig} from "../types";
+import { handleDLQ } from './dlq-handler';
+import { applyMiddleware } from './middleware';
+import { log } from '../logger/logger';
+import { EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig } from "../types";
 
 /**
  * Handles the lifecycle of consuming events, including retries, deduplication, and DLQ routing.
@@ -21,7 +21,7 @@ export class ResilientEventConsumeProcessor {
      */
     async process(event: EventMessage): Promise<void> {
         try {
-            const control = {skipEvent: false};
+            const control = { skipEvent: false };
             this.config.events?.onEventStart?.(event, control);
 
             if (control.skipEvent) {
@@ -29,7 +29,7 @@ export class ResilientEventConsumeProcessor {
                 return;
             }
             const existing = await this.config.store.getEvent(event);
-            if (existing) {
+            if (existing && !event.properties?.headers?.['count']) {
                 log('warn', `[Processor] Duplicate event detected: ${event.messageId}`);
                 return;
             }
@@ -64,7 +64,7 @@ export class ResilientEventConsumeProcessor {
             log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
             await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
 
-            const attempts = event.properties?.headers?.['x-attempts'] ?? 0;
+            const attempts = event.properties?.headers?.['count'] ?? 1;
             const maxAttempts = this.config.retryQueue?.maxAttempts ?? 5;
 
             const updatedEvent: EventMessage = {
@@ -73,23 +73,23 @@ export class ResilientEventConsumeProcessor {
                     ...event.properties,
                     headers: {
                         ...event.properties?.headers,
-                        'x-attempts': attempts + 1
+                        count: attempts + 1
                     }
                 }
             };
 
-            if (!maxAttempts || attempts + 1 >= maxAttempts) {
-                await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
+            if (!maxAttempts || attempts > maxAttempts) {
+                await this.config.store.updateEventStatus(updatedEvent, EventConsumeStatus.ERROR);
                 await handleDLQ({
                     queue: this.config.consumeQueue.queue,
                     exchange: this.config.consumeQueue.exchange
                 }, this.config.broker, updatedEvent);
-                log('warn', `[Processor] Sent to DLQ after ${attempts + 1} attempts: ${event.messageId}`);
+                log('warn', `[Processor] Sent to DLQ after ${attempts} attempts: ${event.messageId}`);
             } else if (this.config.retryQueue?.queue) {
                 await this.config.broker.publish(this.config.retryQueue.queue, updatedEvent, {
                     exchange: this.config.retryQueue.exchange
                 });
-                log('warn', `[Processor] Retrying message ${event.messageId}, attempt ${attempts + 1}`);
+                log('warn', `[Processor] Retrying message ${event.messageId}, attempt ${attempts}`);
             }
 
             this.config.events?.onError?.(event, err as Error);
