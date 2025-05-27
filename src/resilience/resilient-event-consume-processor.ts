@@ -32,9 +32,11 @@ export class ResilientEventConsumeProcessor {
             if (existing && !event.properties?.headers?.['count']) {
                 log('warn', `[Processor] Duplicate event detected: ${event.messageId}`);
                 return;
+            } else if (existing) {
+                await this.config.store.updateEventStatus(event, event.status as EventConsumeStatus);
+            } else {
+                await this.config.store.saveEvent(event);
             }
-
-            await this.config.store.saveEvent(event);
 
             const match = this.config.eventsToProcess.find(e => e.type === event.type);
             if (!match) {
@@ -64,29 +66,19 @@ export class ResilientEventConsumeProcessor {
             log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
             await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
 
-            const attempts = event.properties?.headers?.['count'] ?? 1;
+            const attempts = event.properties?.headers?.['x-death']?.['count'] ?? 1;
             const maxAttempts = this.config.retryQueue?.maxAttempts ?? 5;
 
-            const updatedEvent: EventMessage = {
-                ...event,
-                properties: {
-                    ...event.properties,
-                    headers: {
-                        ...event.properties?.headers,
-                        count: attempts + 1
-                    }
-                }
-            };
-
             if (!maxAttempts || attempts > maxAttempts) {
-                await this.config.store.updateEventStatus(updatedEvent, EventConsumeStatus.ERROR);
                 await handleDLQ({
                     queue: this.config.consumeQueue.queue,
                     exchange: this.config.consumeQueue.exchange
-                }, this.config.broker, updatedEvent);
-                log('warn', `[Processor] Sent to DLQ after ${attempts} attempts: ${event.messageId}`);
+                }, this.config.broker, event);
+                await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
+                log('warn', `[Processor] Sent message: ${event.messageId} to DLQ after ${attempts} attempts`);
             } else if (this.config.retryQueue?.queue) {
-                await this.config.broker.publish(this.config.retryQueue.queue, updatedEvent, {
+                await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
+                await this.config.broker.publish(this.config.retryQueue.queue, event, {
                     exchange: this.config.retryQueue.exchange
                 });
                 log('warn', `[Processor] Retrying message ${event.messageId}, attempt ${attempts}`);
