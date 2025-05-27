@@ -55,7 +55,7 @@ export class AmqpQueue implements MessageQueue {
      * @param options - Optional exchange and AMQP properties.
      */
     async publish(destination: string, event: EventMessage, options?: PublishOptions): Promise<void> {
-        const content = Buffer.from(JSON.stringify(event));
+        const content = Buffer.from(JSON.stringify(event.payload));
         const props = event.properties ?? {persistent: true};
 
         if (options?.exchange) {
