@@ -1,7 +1,7 @@
 import { ResilientEventConsumeProcessor } from "./resilient-event-consume-processor";
 import { AmqpQueue } from "../broker/amqp-queue";
 import { log } from "../logger/logger";
-import {EventMessage, RabbitMQResilientProcessorConfig, ResilientConsumerConfig} from "../types";
+import { EventMessage, RabbitMQResilientProcessorConfig, ResilientConsumerConfig } from "../types";
 
 export class ResilientConsumer {
     private processor!: ResilientEventConsumeProcessor;
@@ -10,7 +10,7 @@ export class ResilientConsumer {
     private heartbeatTimer?: NodeJS.Timeout;
     private reconnecting = false;
 
-    constructor(private readonly config: ResilientConsumerConfig) {}
+    constructor(private readonly config: ResilientConsumerConfig) { }
 
     public async start(): Promise<void> {
         await this.setupAndConsume();
@@ -21,22 +21,14 @@ export class ResilientConsumer {
         await this.queue.connect(this.config.prefetch ?? 1);
 
         const { queue: consumeQueue, options, exchange } = this.config.consumeQueue;
+        await this.queue.channel.assertQueue(consumeQueue, options);
         if (exchange) {
             await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-            await this.queue.channel.assertQueue(consumeQueue, options);
             await this.queue.channel.bindQueue(consumeQueue, exchange.name, exchange.routingKey ?? '');
-        } else {
-            await this.queue.channel.assertQueue(consumeQueue, options);
         }
-
         // Retry queue
         if (this.config.retryQueue) {
             const { queue, exchange, options } = this.config.retryQueue;
-            if (exchange) {
-                await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? '');
-
-            }
             await this.queue.channel.assertQueue(queue, {
                 ...options,
                 arguments: {
@@ -45,16 +37,20 @@ export class ResilientConsumer {
                     'x-message-ttl': this.config.retryQueue.ttlMs ?? 10000
                 }
             });
+            if (exchange) {
+                await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
+                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? '');
+            }
         }
 
         if (this.config.deadLetterQueue) {
             const { queue, exchange, options } = this.config.deadLetterQueue;
+            await this.queue.channel.assertQueue(queue, options);
             if (exchange) {
                 await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
                 await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? '');
 
             }
-            await this.queue.channel.assertQueue(queue, options);
         }
 
         this.processor = new ResilientEventConsumeProcessor({
