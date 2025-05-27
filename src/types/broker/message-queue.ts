@@ -1,4 +1,3 @@
-import type {Options} from 'amqplib';
 import type {EventMessage} from '../resilience/event-message';
 import type {ExchangeConfig} from '../resilience/rabbitmq-resilience-config';
 
