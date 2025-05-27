@@ -20,6 +20,7 @@ export class ResilientEventConsumeProcessor {
      * @param event - The incoming event message from the queue.
      */
     async process(event: EventMessage): Promise<void> {
+        const attempts = event.properties?.headers?.['x-death']?.[0]?.count;
         try {
             const control = { skipEvent: false };
             this.config.events?.onEventStart?.(event, control);
@@ -29,7 +30,7 @@ export class ResilientEventConsumeProcessor {
                 return;
             }
             const existing = await this.config.store.getEvent(event);
-            if (existing && !event.properties?.headers?.['x-death']?.['count']) {
+            if (existing && !attempts) {
                 log('warn', `[Processor] Duplicate event detected: ${event.messageId}`);
                 return;
             } else if (existing) {
@@ -66,22 +67,21 @@ export class ResilientEventConsumeProcessor {
             log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
             await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
 
-            const attempts = event.properties?.headers?.['x-death']?.['count'] ?? 1;
             const maxAttempts = this.config.retryQueue?.maxAttempts ?? 5;
-
-            if (!maxAttempts || attempts > maxAttempts) {
+            const actualAttemp = attempts ?? 1
+            if (!maxAttempts || actualAttemp > maxAttempts) {
                 await handleDLQ({
                     queue: this.config.consumeQueue.queue,
                     exchange: this.config.consumeQueue.exchange
                 }, this.config.broker, event);
                 await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
-                log('warn', `[Processor] Sent message: ${event.messageId} to DLQ after ${attempts} attempts`);
+                log('warn', `[Processor] Sent message: ${event.messageId} to DLQ after ${actualAttemp} attempts`);
             } else if (this.config.retryQueue?.queue) {
                 await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
                 await this.config.broker.publish(this.config.retryQueue.queue, event, {
                     exchange: this.config.retryQueue.exchange
                 });
-                log('warn', `[Processor] Retrying message ${event.messageId}, attempt ${attempts}`);
+                log('warn', `[Processor] Retrying message ${event.messageId}, attempt ${actualAttemp}`);
             }
 
             this.config.events?.onError?.(event, err as Error);
