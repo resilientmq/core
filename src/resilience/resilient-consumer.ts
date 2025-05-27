@@ -23,14 +23,7 @@ export class ResilientConsumer {
         const { queue: consumeQueue, options, exchange } = this.config.consumeQueue;
         if (exchange) {
             await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-            await this.queue.channel.assertQueue(consumeQueue, {
-                ...options,
-                arguments: {
-                    ...(this.config.retryQueue?.queue && {
-                        'x-dead-letter-exchange': this.config.retryQueue.exchange?.name
-                    })
-                }
-            });
+            await this.queue.channel.assertQueue(consumeQueue, options);
             await this.queue.channel.bindQueue(consumeQueue, exchange.name, exchange.routingKey ?? '');
         } else {
             await this.queue.channel.assertQueue(consumeQueue, options);
@@ -41,12 +34,14 @@ export class ResilientConsumer {
             const { queue, exchange, options } = this.config.retryQueue;
             if (exchange) {
                 await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
+                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? '');
+
             }
             await this.queue.channel.assertQueue(queue, {
                 ...options,
                 arguments: {
                     'x-dead-letter-exchange': this.config.consumeQueue.exchange?.name,
-                    'x-dead-letter-routing-key': exchange?.routingKey ?? "",
+                    'x-dead-letter-routing-key': " ",
                     'x-message-ttl': this.config.retryQueue.ttlMs ?? 10000
                 }
             });
@@ -56,6 +51,8 @@ export class ResilientConsumer {
             const { queue, exchange, options } = this.config.deadLetterQueue;
             if (exchange) {
                 await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
+                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? '');
+
             }
             await this.queue.channel.assertQueue(queue, options);
         }
