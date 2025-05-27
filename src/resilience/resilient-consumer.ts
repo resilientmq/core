@@ -46,6 +46,7 @@ export class ResilientConsumer {
                 ...options,
                 arguments: {
                     'x-dead-letter-exchange': this.config.consumeQueue.exchange?.name,
+                    'x-dead-letter-routing-key': exchange?.routingKey ?? "",
                     'x-message-ttl': this.config.retryQueue.ttlMs ?? 10000
                 }
             });
@@ -67,12 +68,6 @@ export class ResilientConsumer {
         await this.queue.consume(consumeQueue, (event: EventMessage) =>
             this.processor.process(event)
         );
-
-        if (this.config.retryQueue?.queue) {
-            await this.queue.consume(this.config.retryQueue.queue, (event: EventMessage) =>
-                this.processor.process(event)
-            );
-        }
 
         this.scheduleReconnection();
         this.startHeartbeat();
