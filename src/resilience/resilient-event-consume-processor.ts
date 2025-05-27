@@ -68,12 +68,12 @@ export class ResilientEventConsumeProcessor {
             await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
 
             const maxAttempts = this.config.retryQueue?.maxAttempts ?? 5;
-            const actualAttemp = attempts ?? 1
-            if (!maxAttempts || actualAttemp > maxAttempts) {
-                await handleDLQ({
-                    queue: this.config.consumeQueue.queue,
-                    exchange: this.config.consumeQueue.exchange
-                }, this.config.broker, event);
+            const actualAttemp = attempts ? attempts + 1 : 1
+            if (!maxAttempts || actualAttemp >= maxAttempts) {
+                await handleDLQ(this.config.deadLetterQueue?.queue ? {
+                    queue: this.config.deadLetterQueue?.queue,
+                    exchange: this.config.deadLetterQueue?.exchange
+                } : undefined, this.config.broker, event);
                 await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
                 log('warn', `[Processor] Sent message: ${event.messageId} to DLQ after ${actualAttemp} attempts`);
             } else if (this.config.retryQueue?.queue) {
