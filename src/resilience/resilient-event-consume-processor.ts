@@ -29,7 +29,7 @@ export class ResilientEventConsumeProcessor {
                 return;
             }
             const existing = await this.config.store.getEvent(event);
-            if (existing && !event.properties?.headers?.['count']) {
+            if (existing && !event.properties?.headers?.['x-death']?.['count']) {
                 log('warn', `[Processor] Duplicate event detected: ${event.messageId}`);
                 return;
             } else if (existing) {
