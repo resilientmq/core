@@ -11,6 +11,7 @@ export class AmqpQueue implements MessageQueue {
     private _channel!: Channel;
     private _prefetchCount = 1;
     private readonly consumerTags: Map<string, string> = new Map();
+    private processingMessages = 0;
     public closed = false;
 
     constructor(private readonly connConfig: string | Options.Connect) {
@@ -80,6 +81,8 @@ export class AmqpQueue implements MessageQueue {
         const {consumerTag} = await this._channel.consume(queue, async (msg) => {
             if (!msg) return;
 
+            this.processingMessages++;
+
             try {
                 const payload = JSON.parse(msg.content.toString());
                 await onMessage({
@@ -98,7 +101,6 @@ export class AmqpQueue implements MessageQueue {
                 }
             } catch (err) {
                 log('error', `[AMQP] Error processing message`, err);
-
                 try {
                     const socket = (this._channel as any)?.connection?.stream;
                     if (socket?.writable) {
@@ -109,6 +111,8 @@ export class AmqpQueue implements MessageQueue {
                 } catch (nackErr) {
                     log('error', `[AMQP] Failed to nack message`, nackErr);
                 }
+            } finally {
+                this.processingMessages--;
             }
         });
 
@@ -133,9 +137,20 @@ export class AmqpQueue implements MessageQueue {
      * Gracefully closes the channel and connection.
      */
     async disconnect(): Promise<void> {
+        await this.cancelAllConsumers();
+
+        const waitForProcessing = async () => {
+            while (this.processingMessages > 0) {
+                await new Promise(resolve => setTimeout(resolve, 100)); // check each 100ms
+            }
+        };
+
+        await waitForProcessing();
+
         if (this._channel) await this._channel.close();
         if (this._connection) await this._connection.close();
     }
+
 
     /**
      * Alias for `disconnect()`.
