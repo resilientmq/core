@@ -15,7 +15,7 @@ export class ResilientEventPublisher {
     /**
      * Initializes the connection and internal queue.
      */
-    async connect(): Promise<void> {
+    private async connect(): Promise<void> {
         await this.queue.connect();
     }
 
@@ -26,6 +26,7 @@ export class ResilientEventPublisher {
      */
     async publish(event: EventMessage): Promise<void> {
         try {
+            await this.connect();
             const existing = await this.config.store.getEvent(event);
             if (existing) {
                 log('warn', `[Publisher] Duplicate message detected: ${event}`);
@@ -42,6 +43,7 @@ export class ResilientEventPublisher {
                     exchange: this.config.exchange
                 }
             );
+            await this.disconnect();
 
             await this.config.store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
             log('info', `[Publisher] Message ${event.messageId} published`);
@@ -54,7 +56,7 @@ export class ResilientEventPublisher {
     /**
      * Gracefully closes connection to broker.
      */
-    async disconnect(): Promise<void> {
+    private async disconnect(): Promise<void> {
         await this.queue.disconnect();
     }
 }
