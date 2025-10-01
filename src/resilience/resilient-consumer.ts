@@ -6,11 +6,12 @@ import { EventMessage, RabbitMQResilientProcessorConfig, ResilientConsumerConfig
 export class ResilientConsumer {
     private processor!: ResilientEventConsumeProcessor;
     private queue!: AmqpQueue;
-    private uptimeTimer?: NodeJS.Timeout;
-    private heartbeatTimer?: NodeJS.Timeout;
+    private uptimeTimer?: ReturnType<typeof setTimeout>;
+    private heartbeatTimer?: ReturnType<typeof setInterval>;
     private reconnecting = false;
+    private processingCount = 0;
 
-    constructor(private readonly config: ResilientConsumerConfig) { }
+    constructor(private readonly config: ResilientConsumerConfig) {}
 
     public async start(): Promise<void> {
         await this.setupAndConsume();
@@ -20,32 +21,34 @@ export class ResilientConsumer {
         this.queue = new AmqpQueue(this.config.connection);
         await this.queue.connect(this.config.prefetch ?? 1);
 
-        // Setup consume queue
         const { queue: consumeQueue, options, exchanges } = this.config.consumeQueue;
         await this.queue.channel.assertQueue(consumeQueue, options);
 
-        // Bind to exchanges if provided
         if (exchanges?.length) {
             for (const additionalExchange of exchanges) {
                 await this.queue.channel.assertExchange(additionalExchange.name, additionalExchange.type, additionalExchange.options);
-                await this.queue.channel.bindQueue(consumeQueue, additionalExchange.name, additionalExchange.routingKey ?? '');
+                await this.queue.channel.bindQueue(consumeQueue, additionalExchange.name, additionalExchange.routingKey ?? "");
             }
         }
 
-        // Retry queue
+        const restrictiveExchange =
+            exchanges?.find((e: any) => e.routingKey) ||
+            exchanges?.[0] ||
+            { name: this.config.retryQueue?.exchange?.name ?? "", routingKey: this.config.retryQueue?.exchange?.routingKey ?? "" };
+
         if (this.config.retryQueue) {
             const { queue, exchange, options } = this.config.retryQueue;
             await this.queue.channel.assertQueue(queue, {
                 ...options,
                 arguments: {
-                    'x-dead-letter-exchange': this.config.retryQueue.exchange?.name,
-                    'x-dead-letter-routing-key': this.config.retryQueue.exchange?.routingKey ?? '',
-                    'x-message-ttl': this.config.retryQueue.ttlMs ?? 10000
+                    "x-dead-letter-exchange": restrictiveExchange.name,
+                    "x-dead-letter-routing-key": restrictiveExchange.routingKey ?? "",
+                    "x-message-ttl": this.config.retryQueue.ttlMs ?? 10000
                 }
             });
             if (exchange) {
                 await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? '');
+                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
             }
         }
 
@@ -54,7 +57,7 @@ export class ResilientConsumer {
             await this.queue.channel.assertQueue(queue, options);
             if (exchange) {
                 await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? '');
+                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
             }
         }
 
@@ -63,9 +66,14 @@ export class ResilientConsumer {
             broker: this.queue
         } as RabbitMQResilientProcessorConfig);
 
-        await this.queue.consume(consumeQueue, (event: EventMessage) =>
-            this.processor.process(event)
-        );
+        await this.queue.consume(consumeQueue, async (event: EventMessage) => {
+            this.processingCount++;
+            try {
+                await this.processor.process(event);
+            } finally {
+                this.processingCount--;
+            }
+        });
 
         this.scheduleReconnection();
         this.startHeartbeat();
@@ -87,7 +95,7 @@ export class ResilientConsumer {
         this.heartbeatTimer = setInterval(async () => {
             try {
                 await this.queue.channel.checkQueue(this.config.consumeQueue.queue);
-            } catch (err) {
+            } catch {
                 log("warn", `[ResilientConsumer] Detected broken channel. Reconnecting...`);
                 await this.reconnect();
             }
@@ -106,12 +114,9 @@ export class ResilientConsumer {
 
             try {
                 let totalMessages = 0;
-
-                // Check main consume queue
                 const main = await this.queue.channel.checkQueue(this.config.consumeQueue.queue);
                 totalMessages += main.messageCount;
 
-                // Check retry queue if exists
                 if (this.config.retryQueue?.queue) {
                     const retry = await this.queue.channel.checkQueue(this.config.retryQueue.queue);
                     totalMessages += retry.messageCount;
@@ -131,7 +136,7 @@ export class ResilientConsumer {
                     }
                     process.exit(0);
                 }
-            } catch (err) {
+            } catch {
                 log("warn", `[IdleMonitor] Skipped check due to reconnect in progress.`);
             }
         };
@@ -139,9 +144,17 @@ export class ResilientConsumer {
         setInterval(checkQueues, checkInterval);
     }
 
+    private async waitForProcessing(): Promise<void> {
+        while (this.processingCount > 0) {
+            await new Promise(res => setTimeout(res, 100));
+        }
+    }
+
     private async reconnect(): Promise<void> {
         if (this.reconnecting) return;
         this.reconnecting = true;
+
+        await this.waitForProcessing();
 
         try {
             this.stopTimers();
