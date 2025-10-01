@@ -20,12 +20,24 @@ export class ResilientConsumer {
         this.queue = new AmqpQueue(this.config.connection);
         await this.queue.connect(this.config.prefetch ?? 1);
 
+        // Setup consume queue
         const { queue: consumeQueue, options, exchange } = this.config.consumeQueue;
         await this.queue.channel.assertQueue(consumeQueue, options);
+
+        // Bind to primary exchange if exists
         if (exchange) {
             await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
             await this.queue.channel.bindQueue(consumeQueue, exchange.name, exchange.routingKey ?? '');
         }
+
+        // Bind to additional exchanges if they exist
+        if (this.config.additionalExchanges) {
+            for (const additionalExchange of this.config.additionalExchanges) {
+                await this.queue.channel.assertExchange(additionalExchange.name, additionalExchange.type, additionalExchange.options);
+                await this.queue.channel.bindQueue(consumeQueue, additionalExchange.name, additionalExchange.routingKey ?? '');
+            }
+        }
+
         // Retry queue
         if (this.config.retryQueue) {
             const { queue, exchange, options } = this.config.retryQueue;
@@ -49,7 +61,6 @@ export class ResilientConsumer {
             if (exchange) {
                 await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
                 await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? '');
-
             }
         }
 
@@ -100,12 +111,17 @@ export class ResilientConsumer {
             if (this.reconnecting) return;
 
             try {
-                const main = await this.queue.channel.checkQueue(this.config.consumeQueue.queue);
-                const retry = this.config.retryQueue?.queue
-                    ? await this.queue.channel.checkQueue(this.config.retryQueue.queue)
-                    : { messageCount: 0 };
+                let totalMessages = 0;
 
-                const totalMessages = main.messageCount + retry.messageCount;
+                // Check main consume queue
+                const main = await this.queue.channel.checkQueue(this.config.consumeQueue.queue);
+                totalMessages += main.messageCount;
+
+                // Check retry queue if exists
+                if (this.config.retryQueue?.queue) {
+                    const retry = await this.queue.channel.checkQueue(this.config.retryQueue.queue);
+                    totalMessages += retry.messageCount;
+                }
 
                 if (totalMessages === 0) {
                     idleCount++;

@@ -73,7 +73,7 @@ export class ResilientEventConsumeProcessor {
                 await handleDLQ(this.config.deadLetterQueue?.queue ? {
                     queue: this.config.deadLetterQueue?.queue,
                     exchange: this.config.deadLetterQueue?.exchange
-                } : undefined, this.config.broker, event);
+                } : undefined, this.config.broker, event, err as Error, actualAttemp, this.config.consumeQueue.queue);
                 await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
                 log('warn', `[Processor] Sent message: ${event.messageId} to DLQ after ${actualAttemp} attempts`);
             } else if (this.config.retryQueue?.queue) {

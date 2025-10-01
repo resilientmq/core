@@ -61,7 +61,8 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `connection` | `string \| Options.Connect` | ✅ | RabbitMQ URI or connection config | – |
 | `consumeQueue.queue` | `string` | ✅ | Queue name to consume | – |
 | `consumeQueue.options` | `AssertQueueOptions` | ✅ | Queue assertion options | durable, arguments |
-| `consumeQueue.exchange` | `ExchangeConfig` | ❌ | Bind queue to this exchange | name, type, routingKey, options |
+| `consumeQueue.exchange` | `ExchangeConfig` | ❌ | Primary exchange to bind queue to | name, type, routingKey, options |
+| `additionalExchanges` | `ExchangeConfig[]` | ❌ | Additional exchanges to bind the same queue to | name, type, routingKey, options |
 | `retryQueue.queue` | `string` | ❌ | Retry queue for failed messages | – |
 | `retryQueue.options` | `AssertQueueOptions` | ❌ | Queue options | durable, arguments |
 | `retryQueue.exchange` | `ExchangeConfig` | ❌ | Exchange for retry routing | name, type, routingKey, options |
@@ -162,8 +163,14 @@ const consumer = new ResilientConsumer({
     options: { durable: true },
     exchange: { name: 'user.events', type: 'fanout', options: { durable: true } }
   },
+  additionalExchanges: [
+    { name: 'orders.events', type: 'topic', routingKey: 'order.*', options: { durable: true } },
+    { name: 'notifications.events', type: 'direct', routingKey: 'notification', options: { durable: true } }
+  ],
   eventsToProcess: [
-    { type: 'user.created', handler: async (payload) => console.log(payload) }
+    { type: 'user.created', handler: async (payload) => console.log('User created:', payload) },
+    { type: 'order.placed', handler: async (payload) => console.log('Order placed:', payload) },
+    { type: 'notification.sent', handler: async (payload) => console.log('Notification sent:', payload) }
   ],
   store
 });

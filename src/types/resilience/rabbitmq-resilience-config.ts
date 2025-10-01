@@ -114,6 +114,11 @@ export type ResilientConsumerConfig = {
     consumeQueue: QueueBinding;
 
     /**
+     * Additional exchanges to bind the consume queue to.
+     */
+    additionalExchanges?: ExchangeConfig[];
+
+    /**
      * Retry queue configuration.
      */
     retryQueue?: RetryQueueConfig;
