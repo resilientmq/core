@@ -29,35 +29,32 @@ export class ResilientConsumer {
                 await this.queue.channel.assertExchange(additionalExchange.name, additionalExchange.type, additionalExchange.options);
                 await this.queue.channel.bindQueue(consumeQueue, additionalExchange.name, additionalExchange.routingKey ?? "");
             }
-        }
 
-        const restrictiveExchange =
-            exchanges?.find((e: any) => e.routingKey) ||
-            exchanges?.[0] ||
-            { name: this.config.retryQueue?.exchange?.name ?? "", routingKey: this.config.retryQueue?.exchange?.routingKey ?? "" };
+            const restrictiveExchange = exchanges.find((e: any) => e.routingKey) || exchanges[0];
 
-        if (this.config.retryQueue) {
-            const { queue, exchange, options } = this.config.retryQueue;
-            await this.queue.channel.assertQueue(queue, {
-                ...options,
-                arguments: {
-                    "x-dead-letter-exchange": restrictiveExchange.name,
-                    "x-dead-letter-routing-key": restrictiveExchange.routingKey ?? "",
-                    "x-message-ttl": this.config.retryQueue.ttlMs ?? 10000
+            if (this.config.retryQueue) {
+                const { queue, exchange, options } = this.config.retryQueue;
+                await this.queue.channel.assertQueue(queue, {
+                    ...options,
+                    arguments: {
+                        "x-dead-letter-exchange": restrictiveExchange.name,
+                        "x-dead-letter-routing-key": restrictiveExchange.routingKey ?? "",
+                        "x-message-ttl": this.config.retryQueue.ttlMs ?? 10000
+                    }
+                });
+                if (exchange) {
+                    await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
+                    await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
                 }
-            });
-            if (exchange) {
-                await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
             }
-        }
 
-        if (this.config.deadLetterQueue) {
-            const { queue, exchange, options } = this.config.deadLetterQueue;
-            await this.queue.channel.assertQueue(queue, options);
-            if (exchange) {
-                await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-                await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
+            if (this.config.deadLetterQueue) {
+                const { queue, exchange, options } = this.config.deadLetterQueue;
+                await this.queue.channel.assertQueue(queue, options);
+                if (exchange) {
+                    await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
+                    await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
+                }
             }
         }
 
