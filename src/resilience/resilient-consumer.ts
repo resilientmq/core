@@ -21,18 +21,12 @@ export class ResilientConsumer {
         await this.queue.connect(this.config.prefetch ?? 1);
 
         // Setup consume queue
-        const { queue: consumeQueue, options, exchange } = this.config.consumeQueue;
+        const { queue: consumeQueue, options, exchanges } = this.config.consumeQueue;
         await this.queue.channel.assertQueue(consumeQueue, options);
 
-        // Bind to primary exchange if exists
-        if (exchange) {
-            await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-            await this.queue.channel.bindQueue(consumeQueue, exchange.name, exchange.routingKey ?? '');
-        }
-
-        // Bind to additional exchanges if they exist
-        if (this.config.additionalExchanges) {
-            for (const additionalExchange of this.config.additionalExchanges) {
+        // Bind to exchanges if provided
+        if (exchanges?.length) {
+            for (const additionalExchange of exchanges) {
                 await this.queue.channel.assertExchange(additionalExchange.name, additionalExchange.type, additionalExchange.options);
                 await this.queue.channel.bindQueue(consumeQueue, additionalExchange.name, additionalExchange.routingKey ?? '');
             }
@@ -44,7 +38,7 @@ export class ResilientConsumer {
             await this.queue.channel.assertQueue(queue, {
                 ...options,
                 arguments: {
-                    'x-dead-letter-exchange': this.config.consumeQueue.exchange?.name,
+                    'x-dead-letter-exchange': this.config.retryQueue.exchange?.name,
                     'x-dead-letter-routing-key': " ",
                     'x-message-ttl': this.config.retryQueue.ttlMs ?? 10000
                 }

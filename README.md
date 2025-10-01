@@ -56,28 +56,27 @@ This package contains the **runtime logic** for publishing and consuming resilie
 
 ## 🔧 Config: `ResilientConsumerConfig`
 
-| Property | Type | Required | Description | Subtype Fields |
-|----------|------|----------|-------------|----------------|
-| `connection` | `string \| Options.Connect` | ✅ | RabbitMQ URI or connection config | – |
-| `consumeQueue.queue` | `string` | ✅ | Queue name to consume | – |
-| `consumeQueue.options` | `AssertQueueOptions` | ✅ | Queue assertion options | durable, arguments |
-| `consumeQueue.exchange` | `ExchangeConfig` | ❌ | Primary exchange to bind queue to | name, type, routingKey, options |
-| `additionalExchanges` | `ExchangeConfig[]` | ❌ | Additional exchanges to bind the same queue to | name, type, routingKey, options |
-| `retryQueue.queue` | `string` | ❌ | Retry queue for failed messages | – |
-| `retryQueue.options` | `AssertQueueOptions` | ❌ | Queue options | durable, arguments |
-| `retryQueue.exchange` | `ExchangeConfig` | ❌ | Exchange for retry routing | name, type, routingKey, options |
-| `retryQueue.ttlMs` | `number` | ❌ | Delay before retrying | – |
-| `retryQueue.maxAttempts` | `number` | ❌ | Max retries before DLQ (default 5) | – |
-| `deadLetterQueue.queue` | `string` | ❌ | Final destination after retries | – |
-| `deadLetterQueue.options` | `AssertQueueOptions` | ❌ | DLQ queue options | durable |
-| `deadLetterQueue.exchange` | `ExchangeConfig` | ❌ | DLQ exchange | name, type, routingKey, options |
-| `eventsToProcess` | `EventProcessConfig[]` | ✅ | List of handled event types | type, handler |
-| `store` | `EventStore` | ✅ | Persistent layer for events | saveEvent, getEvent, updateEventStatus, deleteEvent |
-| `middleware` | `Middleware[]` | ❌ | Hooks to wrap event execution | (event, next) => Promise |
-| `maxUptimeMs` | `number` | ❌ | Restart consumer after X ms | – |
-| `exitIfIdle` | `boolean` | ❌ | Exit process if idle | – |
-| `idleCheckIntervalMs` | `number` | ❌ | Time between idle checks | – |
-| `maxIdleChecks` | `number` | ❌ | How many checks until exit | – |
+| Property                   | Type                        | Required | Description                        | Subtype Fields |
+|----------------------------|-----------------------------|----------|------------------------------------|----------------|
+| `connection`               | `string \| Options.Connect` | ✅ | RabbitMQ URI or connection config  | – |
+| `consumeQueue.queue`       | `string`                    | ✅ | Queue name to consume              | – |
+| `consumeQueue.options`     | `AssertQueueOptions`        | ✅ | Queue assertion options            | durable, arguments |
+| `consumeQueue.exchanges`   | `ExchangeConfig[]`          | ❌ | exchanges to bind queue to         | name, type, routingKey, options |
+| `retryQueue.queue`         | `string`                    | ❌ | Retry queue for failed messages    | – |
+| `retryQueue.options`       | `AssertQueueOptions`        | ❌ | Queue options                      | durable, arguments |
+| `retryQueue.exchange`      | `ExchangeConfig`            | ❌ | Exchange for retry routing         | name, type, routingKey, options |
+| `retryQueue.ttlMs`         | `number`                    | ❌ | Delay before retrying              | – |
+| `retryQueue.maxAttempts`   | `number`                    | ❌ | Max retries before DLQ (default 5) | – |
+| `deadLetterQueue.queue`    | `string`                    | ❌ | Final destination after retries    | – |
+| `deadLetterQueue.options`  | `AssertQueueOptions`        | ❌ | DLQ queue options                  | durable |
+| `deadLetterQueue.exchange` | `ExchangeConfig`            | ❌ | DLQ exchange                       | name, type, routingKey, options |
+| `eventsToProcess`          | `EventProcessConfig[]`      | ✅ | List of handled event types        | type, handler |
+| `store`                    | `EventStore`                | ✅ | Persistent layer for events        | saveEvent, getEvent, updateEventStatus, deleteEvent |
+| `middleware`               | `Middleware[]`              | ❌ | Hooks to wrap event execution      | (event, next) => Promise |
+| `maxUptimeMs`              | `number`                    | ❌ | Restart consumer after X ms        | – |
+| `exitIfIdle`               | `boolean`                   | ❌ | Exit process if idle               | – |
+| `idleCheckIntervalMs`      | `number`                    | ❌ | Time between idle checks           | – |
+| `maxIdleChecks`            | `number`                    | ❌ | How many checks until exit         | – |
 
 ---
 
@@ -161,12 +160,11 @@ const consumer = new ResilientConsumer({
   consumeQueue: {
     queue: 'user.queue',
     options: { durable: true },
-    exchange: { name: 'user.events', type: 'fanout', options: { durable: true } }
+    exchanges: [
+      { name: 'orders.events', type: 'topic', routingKey: 'order.*', options: { durable: true } },
+      { name: 'notifications.events', type: 'direct', routingKey: 'notification', options: { durable: true } }
+    ]
   },
-  additionalExchanges: [
-    { name: 'orders.events', type: 'topic', routingKey: 'order.*', options: { durable: true } },
-    { name: 'notifications.events', type: 'direct', routingKey: 'notification', options: { durable: true } }
-  ],
   eventsToProcess: [
     { type: 'user.created', handler: async (payload) => console.log('User created:', payload) },
     { type: 'order.placed', handler: async (payload) => console.log('Order placed:', payload) },
