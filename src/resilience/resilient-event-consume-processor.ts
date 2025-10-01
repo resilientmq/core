@@ -75,33 +75,20 @@ export class ResilientEventConsumeProcessor {
             const maxAttempts = this.config.retryQueue?.maxAttempts ?? 5;
             const currentAttempt = attempts + 1;
 
-            if (currentAttempt >= maxAttempts) {
+            log('info', `[Processor] Processing attempt ${currentAttempt}/${maxAttempts} for message ${event.messageId} (x-death count: ${attempts})`);
+
+            if (currentAttempt > maxAttempts) {
                 await handleDLQ(this.config.deadLetterQueue?.queue ? {
                     queue: this.config.deadLetterQueue?.queue,
                     exchange: this.config.deadLetterQueue?.exchange
                 } : undefined, this.config.broker, event, err as Error, currentAttempt, this.config.consumeQueue.queue);
                 await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
-                log('warn', `[Processor] Sent message: ${event.messageId} to DLQ after ${currentAttempt} attempts`);
-            } else if (this.config.retryQueue?.queue) {
+                log('warn', `[Processor] Sent message: ${event.messageId} to DLQ after ${attempts} retries`);
+            } else {
                 await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
+                log('warn', `[Processor] Message ${event.messageId} will be retried automatically by RabbitMQ (attempt ${currentAttempt})`);
 
-                const retryEvent: EventMessage = {
-                    ...event,
-                    properties: {
-                        ...event.properties,
-                        headers: {
-                            ...event.properties?.headers,
-                            'x-original-exchange': event.properties?.headers?.['x-original-exchange'] || this.config.consumeQueue.exchanges?.[0]?.name || '',
-                            'x-original-routing-key': event.properties?.headers?.['x-original-routing-key'] || this.config.consumeQueue.exchanges?.[0]?.routingKey || '',
-                            'x-retry-count': currentAttempt
-                        }
-                    }
-                };
-
-                await this.config.broker.publish(this.config.retryQueue.queue, retryEvent, {
-                    exchange: this.config.retryQueue.exchange
-                });
-                log('warn', `[Processor] Retrying message ${event.messageId}, attempt ${currentAttempt}`);
+                throw err;
             }
 
             this.config.events?.onError?.(event, err as Error);

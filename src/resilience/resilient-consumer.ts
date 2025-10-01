@@ -13,6 +13,9 @@ export class ResilientConsumer {
 
     constructor(private readonly config: ResilientConsumerConfig) {}
 
+    /**
+     * Starts the resilient consumer.
+     */
     public async start(): Promise<void> {
         await this.setupAndConsume();
     }
@@ -22,45 +25,58 @@ export class ResilientConsumer {
         await this.queue.connect(this.config.prefetch ?? 1);
 
         const { queue: consumeQueue, options, exchanges } = this.config.consumeQueue;
-        await this.queue.channel.assertQueue(consumeQueue, options);
 
         if (exchanges?.length) {
             for (const additionalExchange of exchanges) {
                 await this.queue.channel.assertExchange(additionalExchange.name, additionalExchange.type, additionalExchange.options);
-                await this.queue.channel.bindQueue(consumeQueue, additionalExchange.name, additionalExchange.routingKey ?? "");
             }
 
             const restrictiveExchange = exchanges.find((e: any) => e.routingKey) || exchanges[0];
 
             if (this.config.retryQueue) {
-                const { queue, exchange, options } = this.config.retryQueue;
+                const { queue: retryQueueName, exchange: retryExchange, options: retryOptions } = this.config.retryQueue;
 
-                // Configurar la retry queue para que use dead letter exchange hacia la cola principal
-                // Esto permite que RabbitMQ maneje automáticamente el x-death header
-                await this.queue.channel.assertQueue(queue, {
-                    ...options,
+                await this.queue.channel.assertQueue(retryQueueName, {
+                    ...retryOptions,
                     arguments: {
-                        ...options?.arguments,
+                        ...retryOptions?.arguments,
                         "x-dead-letter-exchange": restrictiveExchange.name,
                         "x-dead-letter-routing-key": restrictiveExchange.routingKey ?? "",
                         "x-message-ttl": this.config.retryQueue.ttlMs ?? 10000
                     }
                 });
 
-                if (exchange) {
-                    await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-                    await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
+                if (retryExchange) {
+                    await this.queue.channel.assertExchange(retryExchange.name, retryExchange.type, retryExchange.options);
+                    await this.queue.channel.bindQueue(retryQueueName, retryExchange.name, retryExchange.routingKey ?? "");
                 }
+
+                await this.queue.channel.assertQueue(consumeQueue, {
+                    ...options,
+                    arguments: {
+                        ...options?.arguments,
+                        "x-dead-letter-exchange": retryExchange?.name || "",
+                        "x-dead-letter-routing-key": retryExchange?.routingKey ?? ""
+                    }
+                });
+            } else {
+                await this.queue.channel.assertQueue(consumeQueue, options);
             }
 
             if (this.config.deadLetterQueue) {
-                const { queue, exchange, options } = this.config.deadLetterQueue;
-                await this.queue.channel.assertQueue(queue, options);
-                if (exchange) {
-                    await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
-                    await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
+                const { queue: dlqName, exchange: dlqExchange, options: dlqOptions } = this.config.deadLetterQueue;
+                await this.queue.channel.assertQueue(dlqName, dlqOptions);
+                if (dlqExchange) {
+                    await this.queue.channel.assertExchange(dlqExchange.name, dlqExchange.type, dlqExchange.options);
+                    await this.queue.channel.bindQueue(dlqName, dlqExchange.name, dlqExchange.routingKey ?? "");
                 }
             }
+
+            for (const additionalExchange of exchanges) {
+                await this.queue.channel.bindQueue(consumeQueue, additionalExchange.name, additionalExchange.routingKey ?? "");
+            }
+        } else {
+            await this.queue.channel.assertQueue(consumeQueue, options);
         }
 
         this.processor = new ResilientEventConsumeProcessor({
