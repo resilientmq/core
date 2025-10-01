@@ -34,14 +34,19 @@ export class ResilientConsumer {
 
             if (this.config.retryQueue) {
                 const { queue, exchange, options } = this.config.retryQueue;
+
+                // Configurar la retry queue para que use dead letter exchange hacia la cola principal
+                // Esto permite que RabbitMQ maneje automáticamente el x-death header
                 await this.queue.channel.assertQueue(queue, {
                     ...options,
                     arguments: {
+                        ...options?.arguments,
                         "x-dead-letter-exchange": restrictiveExchange.name,
                         "x-dead-letter-routing-key": restrictiveExchange.routingKey ?? "",
                         "x-message-ttl": this.config.retryQueue.ttlMs ?? 10000
                     }
                 });
+
                 if (exchange) {
                     await this.queue.channel.assertExchange(exchange.name, exchange.type, exchange.options);
                     await this.queue.channel.bindQueue(queue, exchange.name, exchange.routingKey ?? "");
