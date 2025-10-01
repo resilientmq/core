@@ -39,7 +39,7 @@ export class ResilientConsumer {
                 ...options,
                 arguments: {
                     'x-dead-letter-exchange': this.config.retryQueue.exchange?.name,
-                    'x-dead-letter-routing-key': " ",
+                    'x-dead-letter-routing-key': this.config.retryQueue.exchange?.routingKey ?? '',
                     'x-message-ttl': this.config.retryQueue.ttlMs ?? 10000
                 }
             });
