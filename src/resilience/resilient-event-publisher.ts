@@ -21,20 +21,30 @@ export class ResilientEventPublisher {
 
     /**
      * Publishes an event, applying resilience (store, retry headers, etc).
+     * If no store is provided, publishing proceeds without persistence.
      *
      * @param event - Event payload to publish.
      */
     async publish(event: EventMessage): Promise<void> {
         try {
             await this.connect();
-            const existing = await this.config.store.getEvent(event);
-            if (existing) {
-                log('warn', `[Publisher] Duplicate message detected: ${event}`);
-                return;
-            }
 
-            event.status = EventPublishStatus.PENDING;
-            await this.config.store.saveEvent(event);
+            const store = this.config.store;
+
+            if (store) {
+                const existing = await store.getEvent(event);
+                if (existing) {
+                    log('warn', `[Publisher] Duplicate message detected: ${event.messageId}`);
+                    await this.disconnect();
+                    return;
+                }
+
+                event.status = EventPublishStatus.PENDING;
+                await store.saveEvent(event);
+            } else {
+                // If no store, still mark status locally for callers if desired
+                event.status = EventPublishStatus.PENDING;
+            }
 
             await this.queue.publish(
                 this.config.queue ?? this.config.exchange?.name!,
@@ -45,10 +55,19 @@ export class ResilientEventPublisher {
             );
             await this.disconnect();
 
-            await this.config.store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
+            if (store) {
+                await store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
+            }
+
             log('info', `[Publisher] Message ${event.messageId} published`);
         } catch (error) {
-            await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
+            if (this.config.store) {
+                try {
+                    await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
+                } catch (err) {
+                    log('error', `[Publisher] Failed to update event status in store for ${event.messageId}`, err);
+                }
+            }
             log('error', `[Publisher] Failed to publish message ${event.messageId}`, error);
         }
     }

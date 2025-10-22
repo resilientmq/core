@@ -185,7 +185,35 @@ import { ResilientEventPublisher } from '@resilientmq/core';
 
 const publisher = new ResilientEventPublisher({
   connection: 'amqp://localhost',
-  store: myStore,
+  exchange: {
+    name: 'user.events',
+    type: 'fanout',
+    options: { durable: true }
+  }
+});
+
+// IMPORTANT: routingKey is now taken from each event's `routingKey` field when publishing to an exchange.
+// If the event does not include `routingKey`, the publisher will send the message with no routing key.
+// The exchange configuration no longer provides the routing key for per-message routing.
+
+await publisher.publish({
+  id: 'evt-1',
+  messageId: 'msg-1',
+  type: 'user.created',
+  payload: { name: 'Alice' },
+  status: 'PENDING_PUBLICATION',
+  // Optional per-message routing key;
+  routingKey: 'user.created'
+});
+```
+
+### Publisher Without Store
+
+```ts
+import { ResilientEventPublisher } from '@resilientmq/core';
+
+const publisher = new ResilientEventPublisher({
+  connection: 'amqp://localhost',
   exchange: {
     name: 'user.events',
     type: 'fanout',
@@ -194,10 +222,10 @@ const publisher = new ResilientEventPublisher({
 });
 
 await publisher.publish({
-  id: 'evt-1',
-  messageId: 'msg-1',
-  type: 'user.created',
-  payload: { name: 'Alice' },
+  id: 'evt-2',
+  messageId: 'msg-2',
+  type: 'user.updated',
+  payload: { name: 'Bob' },
   status: 'PENDING_PUBLICATION'
 });
 ```

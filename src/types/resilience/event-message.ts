@@ -97,6 +97,13 @@ export type EventMessage<T = any> = {
     status: string;
 
     /**
+     * Optional routing key for publishing to an exchange. When present, the publisher
+     * will use this routing key for exchange-based publishes. If omitted, no routing
+     * key will be used (empty string will be passed to the broker where required).
+     */
+    routingKey?: string;
+
+    /**
      * Additional message properties relevant to AMQP delivery.
      */
     properties?: EventProperties;

@@ -34,31 +34,35 @@ export class ResilientEventConsumeProcessor {
                 return;
             }
 
-            const existing = await this.config.store.getEvent(event);
+            let existing = null;
+            if (this.config.store) {
+                existing = await this.config.store.getEvent(event);
+            }
+
             if (existing && attempts === 0) {
                 log('warn', `[Processor] Duplicate event detected: ${event.messageId}`);
                 return;
             } else if (existing) {
-                await this.config.store.updateEventStatus(event, event.status as EventConsumeStatus);
+                if (this.config.store) await this.config.store.updateEventStatus(event, event.status as EventConsumeStatus);
             } else {
-                await this.config.store.saveEvent(event);
+                if (this.config.store) await this.config.store.saveEvent(event);
             }
 
             const match = this.config.eventsToProcess.find(e => e.type === event.type);
             if (!match) {
                 log('warn', `[Processor] No handler for event type: ${event.type}`);
                 if (!this.config.ignoreUnknownEvents) {
-                    await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
+                    if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
                 } else {
-                    await this.config.store.deleteEvent(event);
+                    if (this.config.store) await this.config.store.deleteEvent(event);
                 }
                 return;
             }
 
             const runner = async () => {
-                await this.config.store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
+                if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
                 await match.handler(event.payload);
-                await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
+                if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
                 this.config.events?.onSuccess?.(event);
             };
 
@@ -70,7 +74,7 @@ export class ResilientEventConsumeProcessor {
 
         } catch (err) {
             log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
-            await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
+            if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
 
             const maxAttempts = this.config.retryQueue?.maxAttempts ?? 5;
             const currentAttempt = attempts + 1;
@@ -82,10 +86,10 @@ export class ResilientEventConsumeProcessor {
                     queue: this.config.deadLetterQueue?.queue,
                     exchange: this.config.deadLetterQueue?.exchange
                 } : undefined, this.config.broker, event, err as Error, currentAttempt, this.config.consumeQueue.queue);
-                await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
+                if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
                 log('warn', `[Processor] Sent message: ${event.messageId} to DLQ after ${attempts} retries`);
             } else {
-                await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
+                if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
                 log('warn', `[Processor] Message ${event.messageId} will be retried automatically by RabbitMQ (attempt ${currentAttempt})`);
 
                 throw err;

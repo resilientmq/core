@@ -60,8 +60,10 @@ export class AmqpQueue implements MessageQueue {
         const props = event.properties ?? {persistent: true};
 
         if (options?.exchange) {
-            const {name, type, routingKey = '', options: exchangeOptions} = options.exchange;
+            const {name, type, options: exchangeOptions} = options.exchange;
             await this._channel.assertExchange(name, type, exchangeOptions);
+            // Use routingKey from the event when provided; otherwise use empty string (no routing key)
+            const routingKey = event.routingKey ?? '';
             this._channel.publish(name, routingKey, content, props);
         } else {
             await this._channel.assertQueue(destination, {durable: true});

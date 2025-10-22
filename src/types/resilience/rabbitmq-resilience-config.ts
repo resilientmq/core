@@ -19,7 +19,8 @@ export type ExchangeConfig = {
     type: 'direct' | 'topic' | 'fanout' | 'headers';
 
     /**
-     * Optional routing key used when binding queues or publishing.
+     * Optional routing key used when binding queues to this exchange.
+     * NOTE: per-message routing keys should be provided on each `EventMessage.routingKey`.
      */
     routingKey?: string;
 
@@ -145,9 +146,10 @@ export type ResilientConsumerConfig = {
     middleware?: Middleware[];
 
     /**
-     * Event store implementation for persistence.
+     * Event store implementation for persistence. Optional: if not provided,
+     * consumer will skip persistence-related operations.
      */
-    store: EventStore;
+    store?: EventStore;
 };
 
 /**
@@ -215,9 +217,9 @@ export type ResilientPublisherConfig = {
     queue?: string;
 
     /**
-     * Persistent event store.
+     * Persistent event store. Optional: publisher will skip persistence operations if omitted.
      */
-    store: EventStore;
+    store?: EventStore;
 
     /**
      * Exchange configuration for publishing.
