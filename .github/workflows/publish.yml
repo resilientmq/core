@@ -3,7 +3,6 @@ name: Publish package
 on:
   push:
     branches: [ master, main ]
-    paths: [ 'package.json' ]
   workflow_dispatch: {}
 
 permissions:
@@ -28,7 +27,8 @@ jobs:
       - name: Read package version
         id: read_version
         run: |
-          echo "VERSION=$(node -p \"require('./package.json').version\")" >> $GITHUB_ENV
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Create git tag for version (if missing)
         env:
@@ -57,4 +57,3 @@ jobs:
         run: |
           echo "Publishing version $VERSION to npm"
           npm publish --access public
-
