@@ -2,7 +2,7 @@
 
 All notable changes for this project. This file is generated from the Git commit history. NOTE: there are no Git tags in the repository, so versions were inferred from commit messages that bump the package version (where present). If you prefer strict release tags, I can add annotated tags and re-generate the changelog.
 
-## [0.3.2] - 2025-10-22
+## [0.3.3] - 2025-10-22
 ### Changed
 - Publisher now reads the routing key from each event's `routingKey` field when publishing to an exchange. The exchange configuration is no longer used to supply a per-message routing key. If an event does not specify `routingKey`, the publisher will publish without a routing key (empty string), allowing the broker and bindings to determine delivery.
 - Updated API: `EventMessage` now includes an optional `routingKey?: string` field. (See README and types)
