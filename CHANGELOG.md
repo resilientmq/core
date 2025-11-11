@@ -1,6 +1,163 @@
 # Changelog
 
-All notable changes for this project. This file is generated from the Git commit history. NOTE: there are no Git tags in the repository, so versions were inferred from commit messages that bump the package version (where present). If you prefer strict release tags, I can add annotated tags and re-generate the changelog.
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2025-11-11
+
+### Added
+
+#### Core Features
+- **ResilientConsumer**: Robust consumer with retry and dead-letter queue support
+  - Automatic retry mechanism with configurable attempts and delays
+  - Dead letter queue for permanently failed messages
+  - Support for message deduplication
+  - Event lifecycle tracking (PENDING, PROCESSING, DONE, RETRY, ERROR, DEAD_LETTER)
+  - Configurable prefetch and connection management
+  - Health monitoring and automatic reconnection
+  - Idle detection with configurable exit strategy
+  - Support for ignoring unknown event types
+  
+- **ResilientEventPublisher**: Safe event publishing with persistence
+  - Pre-publish event storage for guaranteed delivery
+  - Status tracking (PENDING, PUBLISHED, ERROR)
+  - Support for both queue and exchange publishing
+  - Duplicate message detection
+  - Optional store (can work without persistence)
+  - **Pending Events Processing**: Periodic checking and processing of pending events
+    - New configuration option `pendingEventsCheckIntervalMs` to enable automatic processing at configurable intervals
+    - Events are automatically sorted and sent in chronological order (oldest first)
+    - Only connects to RabbitMQ when there are actually pending events to process
+  - **Store-Only Publishing**: Added `storeOnly` option to `publish()` method
+    - Allows storing events for later delivery without immediately sending them
+    - Useful for offline scenarios or batch processing
+  - **Publisher Control Methods**:
+    - `processPendingEvents()`: Manually trigger processing of pending events
+    - `stopPendingEventsCheck()`: Stop the periodic checking interval for graceful shutdown
+
+- **Multiple Exchange Bindings**: Support for binding a consume queue to multiple exchanges
+  - Updated `consumeQueue` configuration to accept `exchanges` array instead of single `exchange`
+  - Allows consuming from multiple exchanges with different routing keys
+  - Each exchange can have its own routing key and configuration
+
+- **Enhanced Dead Letter Queue Handling**:
+  - Added error details storage when messages are sent to DLQ
+  - Support for additional exchange bindings in DLQ configuration
+  - Improved error tracking and debugging capabilities
+
+- **Middleware System**: Pluggable middleware pipeline for event processing
+  - Pre and post-processing hooks
+  - Error handling middleware
+  - Event transformation capabilities
+
+- **Event Store Interface**: Flexible persistence layer
+  - `saveEvent()`: Store new events
+  - `getEvent()`: Retrieve events by ID
+  - `updateEventStatus()`: Update event lifecycle status
+  - `deleteEvent()`: Remove processed events
+  - `getPendingEvents()`: Retrieve all events with a specific status for batch processing
+  - Optional implementation (consumer and publisher can work without store)
+
+- **AMQP Queue Management**:
+  - Connection pooling and management
+  - Exchange and queue assertion
+  - Automatic reconnection on failures
+  - Support for all RabbitMQ exchange types (direct, topic, fanout, headers)
+
+- **Lifecycle Hooks**: Event processing callbacks
+  - `onEventStart`: Triggered before processing (with event skip control)
+  - `onSuccess`: Triggered after successful processing
+  - `onError`: Triggered on processing errors
+
+- **Comprehensive TypeScript Support**:
+  - Full type definitions for all APIs
+  - Generic event payload typing
+  - Type-safe configuration objects
+
+- **Logging System**: Built-in logging with configurable levels
+  - Support for info, warn, error, and debug levels
+  - Structured logging for better monitoring
+
+### Changed
+- Enhanced `ResilientEventPublisher` constructor to initialize periodic event checking if configured
+- Improved logging to avoid spam when no pending events are found during periodic checks
+- Event ordering is now centralized in the publisher rather than delegated to the EventStore
+- Consumer and Publisher now support optional store configuration
+- Per-message routing keys are now taken from each `EventMessage.routingKey` field when publishing
+
+### Technical Details
+- Pending events are sorted by `properties.timestamp` in ascending order
+- The periodic check uses `setInterval` with configurable interval in milliseconds
+- Error handling improved for periodic checks to prevent unhandled promise rejections
+- Store is now optional in both consumer and publisher configurations
+
+### Configuration Options
+- **Consumer**:
+  - Connection strings or detailed connection objects
+  - Queue and exchange configuration with multiple exchange support
+  - Retry policies with TTL and max attempts
+  - Health check intervals and timeouts
+  - Unknown event handling policies
+  - Optional event store
+  
+- **Publisher**:
+  - Connection configuration
+  - Queue or exchange targeting
+  - Optional event store for persistence
+  - Configurable pending events check interval
+
+---
+
+## Migration Guide
+
+### EventStore Implementation
+
+If you're implementing an EventStore, add the new `getPendingEvents()` method:
+
+```typescript
+async getPendingEvents(status: EventPublishStatus): Promise<EventMessage[]> {
+    // Return events with the specified status
+    // No need to sort them - the publisher handles ordering automatically
+    return await this.findByStatus(status);
+}
+```
+
+### Pending Events Processing
+
+To enable automatic pending event processing:
+
+```typescript
+const config: ResilientPublisherConfig = {
+    connection: 'amqp://localhost',
+    store: myEventStore,
+    // Check for pending events every 30 seconds
+    pendingEventsCheckIntervalMs: 30000
+};
+```
+
+### Store-Only Publishing
+
+To store events without sending them immediately:
+
+```typescript
+await publisher.publish(event, { storeOnly: true });
+```
+
+### Multiple Exchange Bindings
+
+Update your consumer configuration to use multiple exchanges:
+
+```typescript
+consumeQueue: {
+    queue: 'my-queue',
+    exchanges: [
+        { name: 'exchange-1', type: 'topic', routingKey: 'events.*' },
+        { name: 'exchange-2', type: 'direct', routingKey: 'notification' }
+    ]
+}
+```
 
 ## [0.3.3] - 2025-10-22
 ### Changed
@@ -42,3 +199,9 @@ These entries summarize the initial development and subsequent fixes before the 
 - Retry and x-death count handling fixes. (commits cacc253, 2f1ada0, 194de62)
 - Stability improvements for consumer attempts and connection handling (made connection methods private and more robust). (commits 0534d85, f43f0e2)
 - Type fixes and removal of unnecessary dependencies. (commits fb7b020, e95ed7e)
+
+
+---
+
+For more information, visit the [GitHub repository](https://github.com/resilientmq/core).
+

@@ -225,4 +225,11 @@ export type ResilientPublisherConfig = {
      * Exchange configuration for publishing.
      */
     exchange?: ExchangeConfig;
+
+    /**
+     * Interval in milliseconds to check for pending events and send them.
+     * If not set or 0, automatic pending events processing is disabled.
+     * Events are sent in chronological order (oldest first).
+     */
+    pendingEventsCheckIntervalMs?: number;
 };

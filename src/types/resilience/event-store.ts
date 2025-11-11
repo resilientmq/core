@@ -39,4 +39,12 @@ export interface EventStore {
      * @param event - The event message containing the ID to search for.
      */
     deleteEvent(event: EventMessage): Promise<void>;
+
+    /**
+     * Retrieves all pending events with the specified status.
+     *
+     * @param status - The status to filter events by (e.g., PENDING).
+     * @returns Array of pending events. Order is handled by the publisher.
+     */
+    getPendingEvents(status: EventPublishStatus): Promise<EventMessage[]>;
 }

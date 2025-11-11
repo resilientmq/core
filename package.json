@@ -1,6 +1,6 @@
 {
   "name": "@resilientmq/core",
-  "version": "0.3.3",
+  "version": "1.0.0",
   "main": "index.js",
   "types": "index.d.ts",
   "description": "Core logic for resilient RabbitMQ event processing",

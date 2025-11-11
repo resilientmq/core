@@ -87,7 +87,8 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `connection` | `string \| Options.Connect` | ✅ | RabbitMQ URI or config |
 | `queue` | `string` | ❌ | Target queue (direct publish) |
 | `exchange` | `ExchangeConfig` | ❌ | Exchange for fanout/direct |
-| `store` | `EventStore` | ✅ | Event metadata persistence |
+| `store` | `EventStore` | ❌ | Event metadata persistence (optional) |
+| `pendingEventsCheckIntervalMs` | `number` | ❌ | Interval to check and send pending events (ms) |
 
 ---
 ## 🧩 Custom Event Storage Format
@@ -229,6 +230,49 @@ await publisher.publish({
   status: 'PENDING_PUBLICATION'
 });
 ```
+
+### Publisher with Pending Events Processing
+
+```ts
+import { ResilientEventPublisher } from '@resilientmq/core';
+
+const publisher = new ResilientEventPublisher({
+  connection: 'amqp://localhost',
+  exchange: {
+    name: 'user.events',
+    type: 'fanout',
+    options: { durable: true }
+  },
+  store: myEventStore,
+  // Check for pending events every 30 seconds
+  pendingEventsCheckIntervalMs: 30000
+});
+
+// Store event for later delivery (e.g., when offline)
+await publisher.publish({
+  id: 'evt-3',
+  messageId: 'msg-3',
+  type: 'user.deleted',
+  payload: { id: '123' },
+  status: 'PENDING'
+}, { storeOnly: true });
+
+// The event will be automatically sent every 30 seconds if there are pending events
+
+// Or manually process pending events
+await publisher.processPendingEvents();
+
+// Stop periodic checks when shutting down
+publisher.stopPendingEventsCheck();
+```
+
+**Key Features:**
+- **`storeOnly: true`**: Stores the event without sending it immediately (useful for offline scenarios)
+- **`pendingEventsCheckIntervalMs`**: Configurable interval to automatically check and send pending events
+- **`processPendingEvents()`**: Manually trigger processing of all pending events
+- **`stopPendingEventsCheck()`**: Stop the periodic check for graceful shutdown
+- Events are automatically sorted and sent in chronological order (oldest first)
+- Only connects to RabbitMQ when there are actually pending events to process
 
 ---
 
