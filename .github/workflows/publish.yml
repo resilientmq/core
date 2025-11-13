@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch all history and tags
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -27,18 +29,22 @@ jobs:
       - name: Build project
         run: npm run build
 
+      - name: Get current version
+        id: current
+        run: |
+          VERSION=$(node -p 'require("./package.json").version')
+          NAME=$(node -p 'require("./package.json").name')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Current version: $VERSION"
+          echo "Package name: $NAME"
+
       # Move compiled code from dist to root and remove dist
       - name: Move compiled code and clean up dist
         run: |
           # Move the content of 'dist' outside and delete the 'dist' folder
           mv dist/* ./
           rm -rf dist
-
-      - name: Get current version
-        id: current
-        run: |
-          echo "version=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_OUTPUT"
-          echo "name=$(node -p 'require(\"./package.json\").name')" >> "$GITHUB_OUTPUT"
 
       - name: Create git tag for version (if missing)
         env:
@@ -49,11 +55,20 @@ jobs:
           # Use the version captured in the 'current' step
           TAG="v${{ steps.current.outputs.version }}"
           echo "Preparing tag $TAG"
+          
+          # Fetch all tags from remote
+          git fetch --tags --force
+          
+          # Check if tag exists locally or remotely
           if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping tag creation"
+            echo "Tag $TAG already exists locally, skipping tag creation"
+          elif git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
+            echo "Tag $TAG already exists in remote, skipping tag creation"
           else
+            echo "Creating new tag $TAG"
             git tag -a "$TAG" -m "Release $TAG"
             git push origin "$TAG"
+            echo "Tag $TAG created and pushed successfully"
           fi
 
       - name: Get previous version
