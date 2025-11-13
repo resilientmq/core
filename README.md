@@ -71,7 +71,9 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `deadLetterQueue.options`  | `AssertQueueOptions`        | ❌ | DLQ queue options                  | durable |
 | `deadLetterQueue.exchange` | `ExchangeConfig`            | ❌ | DLQ exchange                       | name, type, routingKey, options |
 | `eventsToProcess`          | `EventProcessConfig[]`      | ✅ | List of handled event types        | type, handler |
-| `store`                    | `EventStore`                | ✅ | Persistent layer for events        | saveEvent, getEvent, updateEventStatus, deleteEvent |
+| `store`                    | `EventStore`                | ❌ | Persistent layer for events        | saveEvent, getEvent, updateEventStatus, deleteEvent |
+| `storeConnectionRetries`   | `number`                    | ❌ | Max retry attempts for store connection (default: 3) | – |
+| `storeConnectionRetryDelayMs` | `number`                 | ❌ | Delay between store retry attempts in ms (default: 1000) | – |
 | `middleware`               | `Middleware[]`              | ❌ | Hooks to wrap event execution      | (event, next) => Promise |
 | `maxUptimeMs`              | `number`                    | ❌ | Restart consumer after X ms        | – |
 | `exitIfIdle`               | `boolean`                   | ❌ | Exit process if idle               | – |
@@ -87,8 +89,13 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `connection` | `string \| Options.Connect` | ✅ | RabbitMQ URI or config |
 | `queue` | `string` | ❌ | Target queue (direct publish) |
 | `exchange` | `ExchangeConfig` | ❌ | Exchange for fanout/direct |
-| `store` | `EventStore` | ❌ | Event metadata persistence (optional) |
-| `pendingEventsCheckIntervalMs` | `number` | ❌ | Interval to check and send pending events (ms) |
+| `store` | `EventStore` | ❌* | Event metadata persistence (optional unless `instantPublish` is false) |
+| `instantPublish` | `boolean` | ❌ | If true (default), publishes immediately. If false, stores for later delivery |
+| `pendingEventsCheckIntervalMs` | `number` | ❌ | Interval to check and send pending events (ms). Only effective when `instantPublish` is false |
+| `storeConnectionRetries` | `number` | ❌ | Max retry attempts for store connection (default: 3) |
+| `storeConnectionRetryDelayMs` | `number` | ❌ | Delay between store retry attempts in ms (default: 1000) |
+
+**Note**: When `instantPublish` is set to `false`, a `store` with `getPendingEvents()` method is **REQUIRED**.
 
 ---
 ## 🧩 Custom Event Storage Format

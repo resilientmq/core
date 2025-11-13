@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2025-11-13
+
+### Added
+
+#### Configuration Options
+- **`instantPublish` in ResilientPublisherConfig**: Controls whether events are published immediately or stored for later
+  - Default: `true` (events are published immediately)
+  - When `false`, events are only stored and sent via `processPendingEvents()` or periodic check
+  - When `false`, a store with `getPendingEvents()` method is REQUIRED
+  - `pendingEventsCheckIntervalMs` only takes effect when `instantPublish` is `false`
+
+- **Store Connection Management**:
+  - Added `storeConnectionRetries` option (default: 3) for both Consumer and Publisher
+  - Added `storeConnectionRetryDelayMs` option (default: 1000ms) for both Consumer and Publisher
+  - Automatic store connection verification on startup with retry logic
+  - Consumer and Publisher will fail initialization if store is configured but connection fails
+  - Health check mechanism for store connections before operations
+
+#### Enhanced Logging System
+- Added timestamps to all log messages for better debugging
+- New `setLogTimestamps()` function to enable/disable timestamps
+- Improved log message formatting and consistency
+- Better structured logging for all operations
+- More detailed error messages with context
+
+#### Validation & Error Handling
+- **Publisher Validations**:
+  - Error thrown if `instantPublish` is `false` but no `store` is configured
+  - Error thrown if `instantPublish` is `false` but `store.getPendingEvents()` is not implemented
+  - Warning logged if `pendingEventsCheckIntervalMs` is set but `instantPublish` is `true`
+  - Error thrown if neither `queue` nor `exchange` is configured
+  
+- **Consumer Validations**:
+  - Error thrown if `consumeQueue.queue` is not configured
+  - Error thrown if `eventsToProcess` is empty or not provided
+  - Store connection verification before consumer starts
+
+### Changed
+
+- **EventStore Interface**:
+  - `getPendingEvents()` method is now optional in TypeScript
+  - Required only when using Publisher with `instantPublish: false`
+  - Better type safety and clearer API contracts
+
+- **Publisher Behavior**:
+  - When `instantPublish` is `true` (default), behaves as before (immediate publish)
+  - When `instantPublish` is `false`, events are only stored until processed
+  - Store connection is verified before any operation
+  - Better error messages and logging throughout
+
+- **Consumer Behavior**:
+  - Store connection is verified during startup if store is configured
+  - Consumer fails to start if store connection cannot be established
+  - Improved error handling and logging
+
+### Fixed
+
+- Store connection issues now properly detected and handled
+- Configuration validation happens before any operations begin
+- Better error messages when configuration is invalid
+- Prevented silent failures when store operations fail
+
+### Technical Improvements
+
+- Centralized configuration validation in constructors
+- Better separation of concerns between instant and deferred publishing
+- Improved code documentation and inline comments
+- Enhanced type safety with better TypeScript definitions
+- Consistent error handling patterns across Publisher and Consumer
+
 ## [1.0.0] - 2025-11-11
 
 ### Added

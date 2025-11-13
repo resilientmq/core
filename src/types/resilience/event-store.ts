@@ -42,9 +42,11 @@ export interface EventStore {
 
     /**
      * Retrieves all pending events with the specified status.
+     * This method is optional, but REQUIRED when using ResilientEventPublisher
+     * with instantPublish set to false.
      *
      * @param status - The status to filter events by (e.g., PENDING).
      * @returns Array of pending events. Order is handled by the publisher.
      */
-    getPendingEvents(status: EventPublishStatus): Promise<EventMessage[]>;
+    getPendingEvents?(status: EventPublishStatus): Promise<EventMessage[]>;
 }

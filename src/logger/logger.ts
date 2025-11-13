@@ -6,12 +6,43 @@ import {LogLevel} from "../types";
 let currentLevel: LogLevel = 'none';
 
 /**
+ * Whether to include timestamps in log messages.
+ */
+let includeTimestamps = true;
+
+/**
  * Updates the global log level for the library.
  *
  * @param level - Desired log level to use.
  */
 export function setLogLevel(level: LogLevel): void {
     currentLevel = level;
+}
+
+/**
+ * Configures whether timestamps should be included in log messages.
+ *
+ * @param enabled - Whether to include timestamps.
+ */
+export function setLogTimestamps(enabled: boolean): void {
+    includeTimestamps = enabled;
+}
+
+/**
+ * Gets a formatted timestamp string.
+ */
+function getTimestamp(): string {
+    return new Date().toISOString();
+}
+
+/**
+ * Formats a log message with optional timestamp.
+ */
+function formatMessage(message: string): string {
+    if (includeTimestamps) {
+        return `[${getTimestamp()}] ${message}`;
+    }
+    return message;
 }
 
 /**
@@ -30,12 +61,14 @@ export function log(level: LogLevel, message: string, ...optionalParams: unknown
     };
 
     if (levels[level] <= levels[currentLevel]) {
+        const formattedMessage = formatMessage(message);
+
         if (level === 'error') {
-            console.error(message, ...optionalParams);
+            console.error(formattedMessage, ...optionalParams);
         } else if (level === 'warn') {
-            console.warn(message, ...optionalParams);
+            console.warn(formattedMessage, ...optionalParams);
         } else if (level === 'info') {
-            console.info(message, ...optionalParams);
+            console.info(formattedMessage, ...optionalParams);
         }
     }
 }

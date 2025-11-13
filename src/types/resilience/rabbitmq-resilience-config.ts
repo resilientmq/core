@@ -150,6 +150,18 @@ export type ResilientConsumerConfig = {
      * consumer will skip persistence-related operations.
      */
     store?: EventStore;
+
+    /**
+     * Maximum number of retry attempts when connecting to the store.
+     * @default 3
+     */
+    storeConnectionRetries?: number;
+
+    /**
+     * Delay in milliseconds between store connection retry attempts.
+     * @default 1000
+     */
+    storeConnectionRetryDelayMs?: number;
 };
 
 /**
@@ -218,6 +230,7 @@ export type ResilientPublisherConfig = {
 
     /**
      * Persistent event store. Optional: publisher will skip persistence operations if omitted.
+     * When instantPublish is false, a store is REQUIRED.
      */
     store?: EventStore;
 
@@ -227,9 +240,32 @@ export type ResilientPublisherConfig = {
     exchange?: ExchangeConfig;
 
     /**
+     * If true (default), events are published instantly to RabbitMQ.
+     * If false, events are only stored and must be sent manually via processPendingEvents()
+     * or automatically via pendingEventsCheckIntervalMs.
+     *
+     * When false, a store with getPendingEvents() method is REQUIRED.
+     * @default true
+     */
+    instantPublish?: boolean;
+
+    /**
      * Interval in milliseconds to check for pending events and send them.
+     * Only effective when instantPublish is false.
      * If not set or 0, automatic pending events processing is disabled.
      * Events are sent in chronological order (oldest first).
      */
     pendingEventsCheckIntervalMs?: number;
+
+    /**
+     * Maximum number of retry attempts when connecting to the store.
+     * @default 3
+     */
+    storeConnectionRetries?: number;
+
+    /**
+     * Delay in milliseconds between store connection retry attempts.
+     * @default 1000
+     */
+    storeConnectionRetryDelayMs?: number;
 };
