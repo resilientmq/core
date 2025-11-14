@@ -34,5 +34,6 @@ module.exports = {
   testTimeout: 60000, // 60 seconds for integration tests
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
   maxWorkers: 1, // Run integration tests serially to avoid port conflicts
-  cacheDirectory: '<rootDir>/.jest-cache/integration'
+  cacheDirectory: '<rootDir>/.jest-cache/integration',
+  detectOpenHandles: true
 };

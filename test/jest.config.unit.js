@@ -42,5 +42,6 @@ module.exports = {
   testTimeout: 5000, // 5 seconds for unit tests
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
   cacheDirectory: '<rootDir>/.jest-cache/unit',
-  maxWorkers: '50%' // Use 50% of available CPU cores for parallel execution
+  maxWorkers: '50%', // Use 50% of available CPU cores for parallel execution
+  detectOpenHandles: true
 };

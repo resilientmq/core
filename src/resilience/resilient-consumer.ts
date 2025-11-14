@@ -8,6 +8,7 @@ export class ResilientConsumer {
     private queue!: AmqpQueue;
     private uptimeTimer?: ReturnType<typeof setTimeout>;
     private heartbeatTimer?: ReturnType<typeof setInterval>;
+    private idleMonitorTimer?: ReturnType<typeof setInterval>;
     private reconnecting = false;
     private processingCount = 0;
     private storeConnected: boolean = false;
@@ -339,7 +340,7 @@ export class ResilientConsumer {
             }
         };
 
-        setInterval(checkQueues, checkInterval);
+        this.idleMonitorTimer = setInterval(checkQueues, checkInterval);
     }
 
     private async waitForProcessing(): Promise<void> {
@@ -406,6 +407,11 @@ export class ResilientConsumer {
             log('debug', '[Consumer] Clearing heartbeat timer');
             clearInterval(this.heartbeatTimer);
             this.heartbeatTimer = undefined;
+        }
+        if (this.idleMonitorTimer) {
+            log('debug', '[Consumer] Clearing idle monitor timer');
+            clearInterval(this.idleMonitorTimer);
+            this.idleMonitorTimer = undefined;
         }
     }
 

@@ -27,5 +27,6 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
   maxWorkers: 1, // Run benchmarks serially for accurate measurements
   bail: false, // Continue running all benchmarks even if one fails
-  cacheDirectory: '<rootDir>/.jest-cache/benchmark'
+  cacheDirectory: '<rootDir>/.jest-cache/benchmark',
+  detectOpenHandles: true
 };

@@ -26,5 +26,6 @@ module.exports = {
   testTimeout: 300000, // 5 minutes for stress tests
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
   maxWorkers: 1, // Run stress tests serially
-  cacheDirectory: '<rootDir>/.jest-cache/stress'
+  cacheDirectory: '<rootDir>/.jest-cache/stress',
+  detectOpenHandles: true
 };
