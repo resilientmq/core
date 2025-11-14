@@ -103,16 +103,19 @@ jobs:
     
     services:
       rabbitmq:
-        image: rabbitmq:3.12-management
+        image: rabbitmq:3.12-management-alpine
         ports:
           - 5672:5672
           - 15672:15672
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
         options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
           --health-interval 10s
-          --health-timeout 5s
+          --health-timeout 10s
           --health-retries 10
-          --health-start-period 30s
+          --health-start-period 60s
     
     steps:
       - name: Checkout code
@@ -136,21 +139,46 @@ jobs:
       - name: Install dependencies
         run: npm ci
       
+      - name: Install netcat for health check
+        run: sudo apt-get update && sudo apt-get install -y netcat
+      
       - name: Wait for RabbitMQ to be ready
         run: |
-          echo "Waiting for RabbitMQ to be ready..."
+          echo "🐰 Waiting for RabbitMQ to be ready..."
           max_attempts=60
           attempt=1
+          
           while [ $attempt -le $max_attempts ]; do
-            if curl -f -s http://localhost:15672/api/healthchecks/node > /dev/null 2>&1; then
-              echo "✅ RabbitMQ is ready!"
-              exit 0
+            # Check AMQP port
+            if nc -z localhost 5672 2>/dev/null; then
+              echo "✅ AMQP port (5672) is accessible"
+              
+              # Check Management port
+              if nc -z localhost 15672 2>/dev/null; then
+                echo "✅ Management port (15672) is accessible"
+                
+                # Give it a few more seconds to fully initialize
+                sleep 3
+                
+                # Final check with management API
+                if curl -u guest:guest -f -s http://localhost:15672/api/overview > /dev/null 2>&1; then
+                  echo "✅ RabbitMQ is fully ready!"
+                  exit 0
+                fi
+              fi
             fi
-            echo "Attempt $attempt/$max_attempts: RabbitMQ not ready yet, waiting..."
+            
+            if [ $((attempt % 10)) -eq 0 ]; then
+              echo "⏳ Still waiting... (attempt $attempt/$max_attempts)"
+            fi
+            
             sleep 2
             attempt=$((attempt + 1))
           done
+          
           echo "❌ RabbitMQ failed to become ready after 120 seconds"
+          echo "📋 Container status:"
+          docker ps -a | grep rabbitmq || echo "No RabbitMQ container found"
           exit 1
       
       - name: Run integration tests
