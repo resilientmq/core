@@ -1,4 +1,5 @@
 import {EventMessage, ExchangeConfig, MessageQueue} from "../types";
+import {log} from "../logger/logger";
 
 export async function handleDLQ(
     dlq:
@@ -14,7 +15,7 @@ export async function handleDLQ(
     originalQueue?: string
 ) {
     if (dlq?.queue && dlq.exchange) {
-        console.warn(`[DLQ] Publishing event ${event.messageId} to DLQ ${dlq.queue}`);
+        log('warn', `[DLQ] Sending message ${event.messageId} to dead letter queue`);
 
         // Crear headers con información del error similar a RabbitMQ
         const errorHeaders = {
@@ -50,7 +51,8 @@ export async function handleDLQ(
         };
 
         await broker.publish(dlq.queue, dlqEvent, {exchange: dlq.exchange});
+        log('debug', `[DLQ] Message ${event.messageId} sent to DLQ successfully`);
     } else {
-        console.warn(`[DLQ] Event ${event.messageId} discarded (DLQ not configured)`);
+        log('warn', `[DLQ] Message ${event.messageId} discarded (DLQ not configured)`);
     }
 }

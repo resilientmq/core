@@ -136,3 +136,12 @@ dist
 .pnp.*
 
 .idea
+.kiro
+
+# Test results and metrics
+test-results/
+*.bench.json
+junit*.xml
+
+# Jest cache
+.jest-cache/

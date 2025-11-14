@@ -1,13 +1,24 @@
 {
   "name": "@resilientmq/core",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "main": "index.js",
   "types": "index.d.ts",
   "description": "Core logic for resilient RabbitMQ event processing",
   "license": "MIT",
   "scripts": {
     "build": "tsc",
-    "test": "jest"
+    "test": "jest --config test/jest.config.js",
+    "test:unit": "jest --config test/jest.config.unit.js",
+    "test:integration": "jest --config test/jest.config.integration.js",
+    "test:stress": "jest --config test/jest.config.stress.js",
+    "test:benchmark": "jest --config test/jest.config.benchmark.js",
+    "test:all": "npm run test:unit && npm run test:integration && npm run test:stress",
+    "test:coverage": "jest --config test/jest.config.unit.js --coverage",
+    "test:watch": "jest --config test/jest.config.unit.js --watch",
+    "benchmark:report": "ts-node test/scripts/generate-benchmark-report.ts",
+    "benchmark:compare": "node test/scripts/compare-benchmarks.js",
+    "coverage:check": "node test/scripts/check-coverage.js",
+    "quality:check": "npm run coverage:check && npm run benchmark:compare"
   },
   "publishConfig": {
     "access": "public"
@@ -31,10 +42,12 @@
   ],
   "author": "resilientmq",
   "devDependencies": {
+    "@testcontainers/rabbitmq": "^10.16.0",
     "@types/amqplib": "^0.10.7",
     "@types/jest": "^29.5.14",
     "@types/node": "^24.6.1",
     "jest": "^29.7.0",
+    "jest-junit": "^16.0.0",
     "ts-jest": "^29.3.4",
     "typescript": "^5.8.3"
   },

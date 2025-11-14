@@ -8,8 +8,13 @@ import {EventMessage, EventPublishStatus, ResilientPublisherConfig} from "../typ
 export class ResilientEventPublisher {
     private readonly queue: AmqpQueue;
     private pendingEventsInterval?: NodeJS.Timeout;
+    private idleTimer?: NodeJS.Timeout;
     private readonly instantPublish: boolean;
     private storeConnected: boolean = false;
+    private connected: boolean = false;
+    private lastPublishTime: number = 0;
+    private pendingOperations: number = 0;
+    private readonly maxConcurrentPublishes: number = 100; // Limit concurrent operations
 
     constructor(private readonly config: ResilientPublisherConfig) {
         // Validar configuración
@@ -83,24 +88,23 @@ export class ResilientEventPublisher {
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                log('info', `[Publisher] Checking store connection (attempt ${attempt}/${maxRetries})...`);
+                log('debug', `[Publisher] Checking store connection (attempt ${attempt}/${maxRetries})...`);
 
                 // Intentar una operación simple para verificar la conexión
                 // Usamos un evento de prueba con un ID único
                 const testEvent: EventMessage = {
                     messageId: `__health_check_${Date.now()}__`,
                     type: '__health_check__',
-                    payload: {},
-                    status: EventPublishStatus.PENDING
+                    payload: {}
                 };
 
                 await this.config.store.getEvent(testEvent);
 
                 this.storeConnected = true;
-                log('info', '[Publisher] Store connection established successfully');
+                log('info', '[Publisher] Store connection established');
                 return;
             } catch (error) {
-                log('warn', `[Publisher] Store connection attempt ${attempt}/${maxRetries} failed`, error);
+                log('debug', `[Publisher] Store connection attempt ${attempt}/${maxRetries} failed`, error);
 
                 if (attempt === maxRetries) {
                     this.storeConnected = false;
@@ -117,9 +121,75 @@ export class ResilientEventPublisher {
      * Initializes the connection and internal queue.
      */
     private async connect(): Promise<void> {
-        log('info', '[Publisher] Connecting to RabbitMQ...');
+        if (this.connected && !this.queue.closed) {
+            return;
+        }
+        
+        // If queue was closed, we need to reconnect
+        if (this.queue.closed) {
+            log('debug', '[Publisher] Queue was closed, creating new connection...');
+            this.connected = false;
+        }
+        
+        log('debug', '[Publisher] Connecting to RabbitMQ...');
         await this.queue.connect();
-        log('info', '[Publisher] Successfully connected to RabbitMQ');
+        this.connected = true;
+        this.lastPublishTime = Date.now();
+        log('debug', '[Publisher] Connected to RabbitMQ');
+        
+        // Start idle timeout monitoring if configured
+        this.startIdleMonitoring();
+    }
+
+    /**
+     * Starts monitoring for idle connections and closes them after timeout.
+     * @private
+     */
+    private startIdleMonitoring(): void {
+        const idleTimeout = this.config.idleTimeoutMs ?? 10000; // Default 10 seconds
+        
+        if (idleTimeout <= 0) {
+            return;
+        }
+
+        // Clear any existing timer
+        if (this.idleTimer) {
+            clearTimeout(this.idleTimer);
+        }
+
+        this.idleTimer = setTimeout(async () => {
+            const idleTime = Date.now() - this.lastPublishTime;
+            
+            // Only close if idle AND no pending operations
+            if (idleTime >= idleTimeout && this.connected && this.pendingOperations === 0) {
+                log('info', `[Publisher] Connection idle for ${idleTime}ms with no pending operations, closing...`);
+                try {
+                    await this.disconnect();
+                } catch (error) {
+                    log('error', '[Publisher] Error during idle disconnect', error);
+                }
+            } else if (this.connected) {
+                // Reschedule check if still connected
+                if (this.pendingOperations > 0) {
+                    log('debug', `[Publisher] Idle check skipped: ${this.pendingOperations} operations pending`);
+                }
+                this.startIdleMonitoring();
+            }
+        }, idleTimeout);
+    }
+
+    /**
+     * Resets the idle timer by updating the last publish time.
+     * @private
+     */
+    private resetIdleTimer(): void {
+        this.lastPublishTime = Date.now();
+        
+        // Restart idle monitoring (default 10s if not configured)
+        const idleTimeout = this.config.idleTimeoutMs ?? 10000;
+        if (idleTimeout > 0) {
+            this.startIdleMonitoring();
+        }
     }
 
     /**
@@ -131,56 +201,57 @@ export class ResilientEventPublisher {
      * @param options.storeOnly - If true, only stores the event without sending it immediately.
      */
     async publish(event: EventMessage, options?: { storeOnly?: boolean }): Promise<void> {
-        log('info', `[Publisher] Starting publish process for message ${event.messageId} (type: ${event.type})`);
+        // Wait if we've reached the concurrency limit
+        while (this.pendingOperations >= this.maxConcurrentPublishes) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
 
+        log('debug', `[Publisher] Publishing message ${event.messageId} (type: ${event.type})`);
+
+        this.pendingOperations++;
         try {
             const store = this.config.store;
 
             // Si hay store configurado, verificar y guardar el evento
             if (store) {
-                log('info', `[Publisher] Store is configured, checking connection...`);
+                log('debug', `[Publisher] Checking store connection...`);
                 // Verificar conexión al store antes de cualquier operación
                 if (!this.storeConnected) {
-                    log('warn', `[Publisher] Store not connected, attempting connection...`);
+                    log('debug', `[Publisher] Store not connected, attempting connection...`);
                     await this.checkStoreConnection();
                 }
 
-                log('info', `[Publisher] Checking for duplicate message ${event.messageId}...`);
+                log('debug', `[Publisher] Checking for duplicate message ${event.messageId}...`);
                 const existing = await store.getEvent(event);
                 if (existing) {
-                    log('warn', `[Publisher] Duplicate message detected: ${event.messageId}, skipping publish`);
+                    log('warn', `[Publisher] Duplicate message detected: ${event.messageId}, skipping`);
                     return;
                 }
-                log('info', `[Publisher] No duplicate found for message ${event.messageId}`);
 
                 event.status = EventPublishStatus.PENDING;
-                log('info', `[Publisher] Saving event ${event.messageId} to store with status PENDING...`);
+                log('debug', `[Publisher] Saving event ${event.messageId} to store...`);
                 await store.saveEvent(event);
-                log('info', `[Publisher] Event ${event.messageId} saved to store successfully`);
 
                 // Si storeOnly está habilitado, solo guardamos el evento sin enviarlo
                 if (options?.storeOnly) {
-                    log('info', `[Publisher] storeOnly option enabled - message ${event.messageId} stored for later delivery`);
+                    log('info', `[Publisher] Message ${event.messageId} stored for later delivery`);
                     return;
                 }
             } else {
-                log('info', `[Publisher] No store configured, proceeding without persistence`);
+                log('debug', `[Publisher] No store configured, proceeding without persistence`);
                 // If no store, still mark status locally for callers if desired
                 event.status = EventPublishStatus.PENDING;
             }
 
             // Publicar solo si instantPublish está habilitado o no hay store
             if (this.instantPublish || !store) {
-                log('info', `[Publisher] InstantPublish is enabled, proceeding to publish message ${event.messageId}...`);
+                log('debug', `[Publisher] Publishing message ${event.messageId} to RabbitMQ...`);
 
                 await this.connect();
+                this.resetIdleTimer();
 
                 const destination = this.config.queue ?? this.config.exchange?.name!;
-                log('info', `[Publisher] Publishing message ${event.messageId} to destination: ${destination}`);
-
-                if (this.config.exchange) {
-                    log('info', `[Publisher] Using exchange: ${this.config.exchange.name} (type: ${this.config.exchange.type}), routing key: ${event.routingKey ?? '(none)'}`);
-                }
+                log('debug', `[Publisher] Destination: ${destination}${this.config.exchange ? ` (exchange: ${this.config.exchange.name}, routing key: ${event.routingKey ?? 'none'})` : ''}`);
 
                 await this.queue.publish(
                     destination,
@@ -189,42 +260,51 @@ export class ResilientEventPublisher {
                         exchange: this.config.exchange
                     }
                 );
-                log('info', `[Publisher] Message ${event.messageId} sent to RabbitMQ successfully`);
-
-                await this.disconnect();
 
                 if (store) {
-                    log('info', `[Publisher] Updating event ${event.messageId} status to PUBLISHED in store...`);
+                    log('debug', `[Publisher] Updating event ${event.messageId} status to PUBLISHED...`);
                     await store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
-                    log('info', `[Publisher] Event ${event.messageId} status updated in store`);
                 }
                 log('info', `[Publisher] Message ${event.messageId} published successfully`);
             } else {
-                log('info', `[Publisher] InstantPublish disabled - message ${event.messageId} stored and will be sent later`);
+                log('info', `[Publisher] Message ${event.messageId} stored for later delivery`);
             }
         } catch (error) {
             log('error', `[Publisher] Failed to publish message ${event.messageId}`, error);
 
             if (this.config.store) {
                 try {
-                    log('info', `[Publisher] Updating event ${event.messageId} status to ERROR in store...`);
+                    log('debug', `[Publisher] Updating event ${event.messageId} status to ERROR...`);
                     await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
-                    log('info', `[Publisher] Event ${event.messageId} status updated to ERROR in store`);
                 } catch (err) {
-                    log('error', `[Publisher] Failed to update event status in store for ${event.messageId}`, err);
+                    log('error', `[Publisher] Failed to update event status in store`, err);
                 }
             }
             throw error;
+        } finally {
+            this.pendingOperations--;
         }
     }
 
     /**
      * Gracefully closes connection to broker.
+     * This is a public method that should be called when the publisher is no longer needed.
      */
-    private async disconnect(): Promise<void> {
-        log('info', '[Publisher] Disconnecting from RabbitMQ...');
+    public async disconnect(): Promise<void> {
+        if (!this.connected) {
+            return;
+        }
+        
+        // Clear idle timer
+        if (this.idleTimer) {
+            clearTimeout(this.idleTimer);
+            this.idleTimer = undefined;
+        }
+        
+        log('debug', '[Publisher] Disconnecting from RabbitMQ...');
         await this.queue.disconnect();
-        log('info', '[Publisher] Successfully disconnected from RabbitMQ');
+        this.connected = false;
+        log('debug', '[Publisher] Disconnected from RabbitMQ');
     }
 
     /**
@@ -232,7 +312,7 @@ export class ResilientEventPublisher {
      * @private
      */
     private startPendingEventsCheck(): void {
-        log('info', `[Publisher] Starting pending events check every ${this.config.pendingEventsCheckIntervalMs}ms`);
+        log('info', `[Publisher] Pending events check enabled (interval: ${this.config.pendingEventsCheckIntervalMs}ms)`);
 
         this.pendingEventsInterval = setInterval(() => {
             this.processPendingEvents().catch((error) => {
@@ -254,11 +334,19 @@ export class ResilientEventPublisher {
     }
 
     /**
+     * Checks if the publisher is currently connected to RabbitMQ.
+     * @returns True if connected, false otherwise
+     */
+    public isConnected(): boolean {
+        return this.connected;
+    }
+
+    /**
      * Processes all pending events from the store and sends them in chronological order.
      * Events are retrieved from oldest to newest based on their timestamp.
      */
     async processPendingEvents(): Promise<void> {
-        log('info', '[Publisher] Starting to process pending events...');
+        log('debug', '[Publisher] Checking for pending events...');
 
         if (!this.config.store) {
             log('warn', '[Publisher] Cannot process pending events: no store configured');
@@ -273,31 +361,28 @@ export class ResilientEventPublisher {
         try {
             // Verificar conexión al store antes de procesar
             if (!this.storeConnected) {
-                log('warn', '[Publisher] Store not connected, attempting connection before processing pending events...');
+                log('debug', '[Publisher] Store not connected, attempting connection...');
                 await this.checkStoreConnection();
             }
 
-            log('info', '[Publisher] Fetching pending events from store...');
+            log('debug', '[Publisher] Fetching pending events from store...');
             // Obtener eventos pendientes
             const pendingEvents = await this.config.store.getPendingEvents(EventPublishStatus.PENDING);
 
             if (pendingEvents.length === 0) {
-                log('info', '[Publisher] No pending events found to process');
+                log('debug', '[Publisher] No pending events found');
                 return;
             }
 
-            log('info', `[Publisher] Found ${pendingEvents.length} pending event(s) in store`);
+            log('info', `[Publisher] Processing ${pendingEvents.length} pending event(s)`);
 
             // Ordenar del más antiguo al más nuevo basado en timestamp
-            log('info', '[Publisher] Sorting events by timestamp (oldest first)...');
+            log('debug', '[Publisher] Sorting events by timestamp (oldest first)...');
             const sortedEvents = pendingEvents.sort((a, b) => {
                 const timeA = a.properties?.timestamp || 0;
                 const timeB = b.properties?.timestamp || 0;
                 return timeA - timeB;
             });
-            log('info', `[Publisher] Events sorted: ${sortedEvents.length} event(s) ready to process`);
-
-            log('info', `[Publisher] Processing ${sortedEvents.length} pending events...`);
 
             await this.connect();
 
@@ -307,11 +392,10 @@ export class ResilientEventPublisher {
             // Procesar cada evento en orden
             for (let i = 0; i < sortedEvents.length; i++) {
                 const event = sortedEvents[i];
-                log('info', `[Publisher] Processing pending event ${i + 1}/${sortedEvents.length}: ${event.messageId} (type: ${event.type})`);
+                log('debug', `[Publisher] Processing pending event ${i + 1}/${sortedEvents.length}: ${event.messageId}`);
 
                 try {
                     const destination = this.config.queue ?? this.config.exchange?.name!;
-                    log('info', `[Publisher] Publishing pending message ${event.messageId} to destination: ${destination}`);
 
                     await this.queue.publish(
                         destination,
@@ -320,27 +404,23 @@ export class ResilientEventPublisher {
                             exchange: this.config.exchange
                         }
                     );
-                    log('info', `[Publisher] Pending message ${event.messageId} sent to RabbitMQ`);
 
-                    log('info', `[Publisher] Updating status to PUBLISHED for message ${event.messageId}...`);
+                    log('debug', `[Publisher] Updating status to PUBLISHED for message ${event.messageId}...`);
                     await this.config.store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
                     successCount++;
-                    log('info', `[Publisher] Pending message ${event.messageId} published successfully (${successCount}/${sortedEvents.length} completed)`);
                 } catch (error) {
                     errorCount++;
-                    log('error', `[Publisher] Failed to publish pending message ${event.messageId} (error ${errorCount})`, error);
+                    log('error', `[Publisher] Failed to publish pending message ${event.messageId}`, error);
 
                     try {
-                        log('info', `[Publisher] Updating status to ERROR for failed message ${event.messageId}...`);
                         await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
                     } catch (updateError) {
-                        log('error', `[Publisher] Failed to update ERROR status for message ${event.messageId}`, updateError);
+                        log('error', `[Publisher] Failed to update ERROR status`, updateError);
                     }
                 }
             }
 
-            await this.disconnect();
-            log('info', `[Publisher] Finished processing pending events: ${successCount} successful, ${errorCount} failed out of ${sortedEvents.length} total`);
+            log('info', `[Publisher] Processed ${successCount} pending event(s) successfully${errorCount > 0 ? `, ${errorCount} failed` : ''}`);
         } catch (error) {
             log('error', '[Publisher] Error during pending events processing', error);
             throw error;

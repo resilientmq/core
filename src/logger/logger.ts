@@ -57,7 +57,8 @@ export function log(level: LogLevel, message: string, ...optionalParams: unknown
         none: 0,
         error: 1,
         warn: 2,
-        info: 3
+        info: 3,
+        debug: 4
     };
 
     if (levels[level] <= levels[currentLevel]) {
@@ -69,6 +70,8 @@ export function log(level: LogLevel, message: string, ...optionalParams: unknown
             console.warn(formattedMessage, ...optionalParams);
         } else if (level === 'info') {
             console.info(formattedMessage, ...optionalParams);
+        } else if (level === 'debug') {
+            console.log(formattedMessage, ...optionalParams);
         }
     }
 }

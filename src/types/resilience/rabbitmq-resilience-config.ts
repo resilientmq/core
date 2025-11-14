@@ -184,9 +184,10 @@ export type EventProcessConfig<T = any> = {
     type: string;
 
     /**
-     * Handler function that processes the event payload.
+     * Handler function that processes the event.
+     * Receives the full event message including messageId, type, and payload.
      */
-    handler: (payload: T) => Promise<void>;
+    handler: (event: EventMessage<T>) => Promise<void>;
 };
 
 
@@ -268,4 +269,11 @@ export type ResilientPublisherConfig = {
      * @default 1000
      */
     storeConnectionRetryDelayMs?: number;
+
+    /**
+     * Time in milliseconds of inactivity before automatically closing the connection.
+     * Set to 0 to disable automatic disconnection.
+     * @default 10000 (10 seconds)
+     */
+    idleTimeoutMs?: number;
 };

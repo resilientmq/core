@@ -39,13 +39,45 @@ export class AmqpQueue implements MessageQueue {
      */
     async connect(prefetch: number = 1): Promise<void> {
         this._prefetchCount = prefetch;
-        this._connection = await amqplib.connect(this.connConfig);
-        this._channel = await this._connection.createChannel();
-        await this._channel.prefetch(this._prefetchCount);
+        
+        try {
+            this._connection = await amqplib.connect(this.connConfig);
+            
+            // Setup connection event handlers immediately after connection
+            this._connection.on('close', () => {
+                this.closed = true;
+                log('debug', '[AMQP] Connection closed');
+            });
 
-        this._connection.on('close', () => {
+            this._connection.on('error', (err) => {
+                this.closed = true;
+                log('error', '[AMQP] Connection error', err);
+            });
+
+            // Remove default error handler to prevent unhandled errors
+            this._connection.removeAllListeners('error');
+            this._connection.on('error', (err) => {
+                this.closed = true;
+                log('error', '[AMQP] Connection error', err);
+            });
+
+            this._channel = await this._connection.createChannel();
+            
+            // Setup channel event handlers immediately after channel creation
+            this._channel.on('close', () => {
+                log('debug', '[AMQP] Channel closed');
+            });
+
+            this._channel.on('error', (err) => {
+                log('error', '[AMQP] Channel error', err);
+            });
+
+            await this._channel.prefetch(this._prefetchCount);
+        } catch (error) {
             this.closed = true;
-        });
+            log('error', '[AMQP] Failed to connect', error);
+            throw error;
+        }
     }
 
     /**
@@ -57,7 +89,21 @@ export class AmqpQueue implements MessageQueue {
      */
     async publish(destination: string, event: EventMessage, options?: PublishOptions): Promise<void> {
         const content = Buffer.from(JSON.stringify(event.payload));
-        const props = event.properties ?? {persistent: true};
+        
+        // Merge event properties with messageId and type
+        // Note: AMQP uses message_id (snake_case), but amqplib accepts messageId (camelCase)
+        const props = {
+            ...(event.properties ?? {}),
+            messageId: event.messageId,
+            type: event.type,
+            persistent: event.properties?.deliveryMode === 2 || true,
+            // Also add to headers for reliability
+            headers: {
+                ...(event.properties?.headers ?? {}),
+                'x-message-id': event.messageId,
+                'x-event-type': event.type
+            }
+        };
 
         if (options?.exchange) {
             const {name, type, options: exchangeOptions} = options.exchange;
@@ -66,7 +112,8 @@ export class AmqpQueue implements MessageQueue {
             const routingKey = event.routingKey ?? '';
             this._channel.publish(name, routingKey, content, props);
         } else {
-            await this._channel.assertQueue(destination, {durable: true});
+            // Don't assert queue here - let the consumer create it with proper DLX configuration
+            // Just send to the queue (it should already exist)
             this._channel.sendToQueue(destination, content, props);
         }
     }
@@ -78,7 +125,8 @@ export class AmqpQueue implements MessageQueue {
      * @param onMessage - Function to handle each message.
      */
     async consume(queue: string, onMessage: (event: EventMessage) => Promise<void>): Promise<void> {
-        await this._channel.checkQueue(queue);
+        // Don't check queue here - it should already be asserted by the consumer setup
+        // await this._channel.checkQueue(queue);
 
         const {consumerTag} = await this._channel.consume(queue, async (msg) => {
             if (!msg) return;
@@ -87,9 +135,14 @@ export class AmqpQueue implements MessageQueue {
 
             try {
                 const payload = JSON.parse(msg.content.toString());
+                // Try to get messageId from properties first, then from headers
+                const messageId = msg.properties.messageId || msg.properties.headers?.['x-message-id'];
+                const type = msg.properties.type || msg.properties.headers?.['x-event-type'];
+                
+
                 await onMessage({
-                    messageId: msg.properties.messageId,
-                    type: msg.properties.type,
+                    messageId,
+                    type,
                     payload,
                     status: EventConsumeStatus.RECEIVED,
                     properties: msg.properties,
@@ -98,17 +151,20 @@ export class AmqpQueue implements MessageQueue {
                 const socket = (this._channel as any)?.connection?.stream;
                 if (socket?.writable) {
                     this._channel.ack(msg);
+                    log('debug', `[AMQP] Message acknowledged`);
                 } else {
-                    log('warn', `[AMQP] Cannot ack: channel stream closed`);
+                    log('warn', `[AMQP] Cannot ack: channel closed`);
                 }
             } catch (err) {
-                log('error', `[AMQP] Error processing message`, err);
+                log('debug', `[AMQP] Message processing failed, sending nack`);
                 try {
                     const socket = (this._channel as any)?.connection?.stream;
                     if (socket?.writable) {
+                        // Nack without requeue - this triggers DLX routing to retry queue
                         this._channel.nack(msg, false, false);
+                        log('debug', `[AMQP] Message nacked (will be routed to DLX)`);
                     } else {
-                        log('warn', `[AMQP] Cannot nack: channel stream closed`);
+                        log('warn', `[AMQP] Cannot nack: channel closed`);
                     }
                 } catch (nackErr) {
                     log('error', `[AMQP] Failed to nack message`, nackErr);
@@ -139,6 +195,10 @@ export class AmqpQueue implements MessageQueue {
      * Gracefully closes the channel and connection.
      */
     async disconnect(): Promise<void> {
+        if (this.closed) {
+            return;
+        }
+
         await this.cancelAllConsumers();
 
         const waitForProcessing = async () => {
@@ -149,8 +209,23 @@ export class AmqpQueue implements MessageQueue {
 
         await waitForProcessing();
 
-        if (this._channel) await this._channel.close();
-        if (this._connection) await this._connection.close();
+        try {
+            if (this._channel) {
+                await this._channel.close();
+            }
+        } catch (err) {
+            log('warn', '[AMQP] Error closing channel', err);
+        }
+
+        try {
+            if (this._connection) {
+                await this._connection.close();
+            }
+        } catch (err) {
+            log('warn', '[AMQP] Error closing connection', err);
+        }
+
+        this.closed = true;
     }
 
 

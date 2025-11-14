@@ -92,9 +92,9 @@ export type EventMessage<T = any> = {
     payload: T;
 
     /**
-     * The current lifecycle status of the event.
+     * The current lifecycle status of the event (internal use, managed by the library).
      */
-    status: string;
+    status?: string;
 
     /**
      * Optional routing key for publishing to an exchange. When present, the publisher
