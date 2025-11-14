@@ -183,13 +183,24 @@ describe('ResilientEventConsumeProcessor', () => {
                 }
             };
 
+            // Should NOT throw error - message is sent to DLQ and ACK'd
             await processor.process(testEvent);
-
+            
+            // Store should be updated to ERROR status
+            const savedEvent = await mockStore.getEvent(testEvent);
+            expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
+            
+            // Verify message was published to DLQ
             expect(mockBroker.publish).toHaveBeenCalledWith(
                 'test.dlq',
-                expect.any(Object),
                 expect.objectContaining({
-                    exchange: config.deadLetterQueue.exchange
+                    messageId: testEvent.messageId,
+                    type: testEvent.type
+                }),
+                expect.objectContaining({
+                    exchange: expect.objectContaining({
+                        name: 'dlq.exchange'
+                    })
                 })
             );
         });
@@ -214,6 +225,7 @@ describe('ResilientEventConsumeProcessor', () => {
                 }
             };
 
+            // Should NOT throw error - message is sent to DLQ and ACK'd
             await processor.process(testEvent);
 
             const savedEvent = await mockStore.getEvent(testEvent);
@@ -328,7 +340,7 @@ describe('ResilientEventConsumeProcessor', () => {
             expect(handler).toHaveBeenCalled();
         });
 
-        it('should use default maxAttempts of 5 when not configured', async () => {
+        it('should use default maxAttempts of 3 when not configured', async () => {
             const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
             config.eventsToProcess = [{ type: 'test.event', handler }];
             config.retryQueue = { queue: 'retry.queue' };
@@ -342,15 +354,21 @@ describe('ResilientEventConsumeProcessor', () => {
             };
             processor = new ResilientEventConsumeProcessor(config);
 
-            // Simulate 6th attempt (exceeds default max of 5)
+            // Simulate 4th attempt (exceeds default max of 3)
             testEvent.properties = {
                 headers: {
-                    'x-death': [{ count: 5 }]
+                    'x-death': [{ count: 3 }]
                 }
             };
 
+            // Should NOT throw error - message is sent to DLQ and ACK'd
             await processor.process(testEvent);
 
+            // Verify status was updated to ERROR
+            const savedEvent = await mockStore.getEvent(testEvent);
+            expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
+            
+            // Verify message was published to DLQ
             expect(mockBroker.publish).toHaveBeenCalled();
         });
     });

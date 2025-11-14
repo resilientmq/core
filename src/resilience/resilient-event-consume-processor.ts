@@ -108,41 +108,53 @@ export class ResilientEventConsumeProcessor {
                 // If DLQ is configured, send message to DLQ manually
                 if (this.config.deadLetterQueue) {
                     log('info', `[Processor] Sending message ${event.messageId} to DLQ`);
-                    try {
-                        // Create DLQ event with error metadata
-                        const dlqEvent: EventMessage = {
-                            ...event,
-                            properties: {
-                                ...event.properties,
-                                headers: {
-                                    ...(event.properties?.headers ?? {}),
-                                    'x-original-error': (err as Error).message,
-                                    'x-failed-attempts': currentAttempt
+                    
+                    const dlqEvent: EventMessage = {
+                        ...event,
+                        properties: {
+                            ...event.properties,
+                            headers: {
+                                ...event.properties?.headers,
+                                'x-error-message': (err as Error).message,
+                                'x-error-name': (err as Error).name,
+                                'x-death-count': currentAttempt,
+                                'x-death-reason': 'rejected',
+                                'x-death-time': new Date().toISOString(),
+                                'x-original-queue': this.config.consumeQueue.queue,
+                                'x-first-death-reason': 'rejected'
+                            }
+                        }
+                    };
+                    
+                    // Publish to DLQ
+                    if (this.config.deadLetterQueue.exchange) {
+                        await this.config.broker.publish(
+                            this.config.deadLetterQueue.queue,
+                            dlqEvent,
+                            {
+                                exchange: {
+                                    name: this.config.deadLetterQueue.exchange.name,
+                                    type: this.config.deadLetterQueue.exchange.type,
+                                    options: this.config.deadLetterQueue.exchange.options
                                 }
                             }
-                        };
-                        
-                        // Publish to DLQ using broker's publish method
-                        const dlqQueue = this.config.deadLetterQueue.queue;
-                        const dlqExchange = this.config.deadLetterQueue.exchange;
-                        
-                        await this.config.broker.publish(
-                            dlqQueue,
-                            dlqEvent,
-                            dlqExchange ? { exchange: dlqExchange } : undefined
                         );
-                        
-                        log('debug', `[Processor] Message ${event.messageId} sent to DLQ successfully`);
-                    } catch (dlqError) {
-                        log('error', `[Processor] Failed to send message ${event.messageId} to DLQ`, dlqError);
+                    } else {
+                        await this.config.broker.publish(
+                            this.config.deadLetterQueue.queue,
+                            dlqEvent
+                        );
                     }
-                    // Don't throw - message will be acked since we handled it
-                    return;
-                } else {
-                    log('warn', `[Processor] No DLQ configured, message ${event.messageId} will be acked and lost`);
-                    // Don't throw - message will be acked
+                    
+                    log('info', `[Processor] Message ${event.messageId} sent to DLQ successfully`);
+                    // Don't throw error - message was handled by sending to DLQ
+                    // This will cause the message to be ACK'd
                     return;
                 }
+                
+                // No DLQ configured, re-throw the error
+                log('info', `[Processor] Re-throwing error for message ${event.messageId} (no DLQ configured)`);
+                throw err;
             } else {
                 // Still have retries left
                 log('info', `[Processor] Message ${event.messageId} will be retried (attempt ${currentAttempt}/${maxAttempts})`);
