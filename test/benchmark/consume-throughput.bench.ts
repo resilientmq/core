@@ -1,5 +1,6 @@
 import { ResilientEventPublisher } from '../../src/resilience/resilient-event-publisher';
 import { ResilientConsumer } from '../../src/resilience/resilient-consumer';
+import { EventMessage } from '../../src/types';
 import { TestContainersManager } from '../utils/test-containers';
 import { PublisherConfigBuilder, ConsumerConfigBuilder } from '../utils/test-data-builders';
 import { createTestEvent } from '../fixtures/events';
@@ -140,27 +141,16 @@ describe('Benchmark: Consume Throughput', () => {
     // Run 5 iterations
     for (let iteration = 1; iteration <= ITERATIONS; iteration++) {
         it(`iteration ${iteration}/${ITERATIONS}`, async () => {
-            // Pre-publish messages
-            console.log(`\nIteration ${iteration}: Publishing ${MESSAGES_PER_ITERATION} messages...`);
-            for (let i = 0; i < MESSAGES_PER_ITERATION; i++) {
-                const event = createTestEvent(
-                    { iteration, index: i, timestamp: Date.now() },
-                    'benchmark.consume.throughput'
-                );
-                await publisher.publish(event);
-            }
-            
-            // Setup consumer and measure consumption time
+            // Setup consumer FIRST to ensure queue exists
             let messagesConsumed = 0;
             const latencies: number[] = [];
-            const startTime = Date.now();
             
             const consumerConfig = new ConsumerConfigBuilder()
                 .withConnection(connectionUrl)
                 .withQueue('benchmark.consume.throughput')
                 .withPrefetch(100)
-                .withEventHandler('benchmark.consume.throughput', async (payload: any) => {
-                    const messageStartTime = payload.timestamp;
+                .withEventHandler('benchmark.consume.throughput', async (event: EventMessage) => {
+                    const messageStartTime = event.payload.timestamp;
                     const latency = Date.now() - messageStartTime;
                     latencies.push(latency);
                     messagesConsumed++;
@@ -169,11 +159,24 @@ describe('Benchmark: Consume Throughput', () => {
             
             const consumer = new ResilientConsumer(consumerConfig);
             
-            // Start consuming
+            // Start consumer to create queue
             await consumer.start();
             
+            // Give consumer time to fully initialize and create queue
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Now publish messages (they will go to the existing queue)
+            const startTime = Date.now();
+            for (let i = 0; i < MESSAGES_PER_ITERATION; i++) {
+                const event = createTestEvent(
+                    { iteration, index: i, timestamp: Date.now() },
+                    'benchmark.consume.throughput'
+                );
+                await publisher.publish(event);
+            }
+            
             // Wait for all messages to be consumed
-            const maxWaitTime = 30000; // 30 seconds max
+            const maxWaitTime = 30000;
             const checkInterval = 100;
             let waited = 0;
             

@@ -1,5 +1,6 @@
 import { ResilientEventPublisher } from '../../src/resilience/resilient-event-publisher';
 import { ResilientConsumer } from '../../src/resilience/resilient-consumer';
+import { EventMessage } from '../../src/types';
 import { TestContainersManager } from '../utils/test-containers';
 import { PublisherConfigBuilder, ConsumerConfigBuilder } from '../utils/test-data-builders';
 import { EventStoreMock } from '../utils/event-store-mock';
@@ -94,8 +95,8 @@ describe('Benchmark: End-to-End Latency', () => {
                     .withConnection(connectionUrl)
                     .withQueue(queueName)
                     .withPrefetch(10)
-                    .withEventHandler('test.e2e', async (payload: any) => {
-                        const latency = Date.now() - payload.publishTime;
+                    .withEventHandler('test.e2e', async (event: EventMessage) => {
+                        const latency = Date.now() - event.payload.publishTime;
                         latencies.push(latency);
                         messagesReceived++;
                     })
@@ -103,6 +104,9 @@ describe('Benchmark: End-to-End Latency', () => {
                 
                 const consumer = new ResilientConsumer(consumerConfig);
                 await consumer.start();
+                
+                // Give consumer time to fully initialize
+                await new Promise(resolve => setTimeout(resolve, 2000));
                 
                 // Setup publisher without store
                 const publisherConfig = new PublisherConfigBuilder()
@@ -176,8 +180,8 @@ describe('Benchmark: End-to-End Latency', () => {
                     .withQueue(queueName)
                     .withPrefetch(10)
                     .withStore(store)
-                    .withEventHandler('test.e2e', async (payload: any) => {
-                        const latency = Date.now() - payload.publishTime;
+                    .withEventHandler('test.e2e', async (event: EventMessage) => {
+                        const latency = Date.now() - event.payload.publishTime;
                         latencies.push(latency);
                         messagesReceived++;
                     })
@@ -186,11 +190,14 @@ describe('Benchmark: End-to-End Latency', () => {
                 const consumer = new ResilientConsumer(consumerConfig);
                 await consumer.start();
                 
-                // Setup publisher with store
+                // Give consumer time to fully initialize
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // Setup publisher WITHOUT store (to avoid duplicate detection issues)
+                // The consumer has the store, which is what we want to benchmark
                 const publisherConfig = new PublisherConfigBuilder()
                     .withConnection(connectionUrl)
                     .withQueue(queueName)
-                    .withStore(store)
                     .withInstantPublish(true)
                     .build();
                 

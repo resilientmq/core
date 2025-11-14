@@ -9,4 +9,3 @@ export * from './resilience/rabbitmq-resilience-config';
 export * from './broker/message-queue';
 
 export * from './logger/logger';
-
