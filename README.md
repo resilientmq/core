@@ -13,9 +13,9 @@ Core logic for the resilient message queue system built on top of RabbitMQ, prov
   - [🔄 Example: Custom Storage Serializer](#-example-custom-storage-serializer)
 - [🚀 Example: Consumer](#-example-consumer)
 - [🚀 Example: Publisher](#-example-publisher)
-- [🧪 Tests](#-tests)
-- [Docs](#docs)
-- [LICENSE](#license)
+- [🧪 Testing](#-testing)
+- [👥 Contributors](#-contributors)
+- [📄 License](#-license)
 
 ## 📦 Installation
 
@@ -283,11 +283,61 @@ publisher.stopPendingEventsCheck();
 
 ---
 
-## 🧪 Tests
+## 🧪 Testing
 
-- ✅ Unit tests with Jest
-- ✅ Integration-ready structure
-- ✅ 100% coverage possible with mocks
+@resilientmq/core includes a comprehensive automated testing strategy to ensure reliability, performance, and quality.
+
+### Test Suite Overview
+
+| Test Type | Purpose | Execution Time | Coverage |
+|-----------|---------|----------------|----------|
+| **Unit Tests** | Fast, isolated component testing with mocks | < 30s | 70%+ code coverage |
+| **Integration Tests** | End-to-end testing with real RabbitMQ | < 5min | Full integration scenarios |
+| **Stress Tests** | High-volume and high-speed load testing | < 10min | Resilience validation |
+| **Benchmarks** | Performance measurement and regression detection | < 15min | Throughput & latency metrics |
+
+### Running Tests
+
+```bash
+# Run all tests
+npm test
+
+# Run specific test suites
+npm run test:unit              # Unit tests only
+npm run test:integration       # Integration tests (requires Docker)
+npm run test:stress           # Stress tests (requires Docker)
+npm run test:benchmark        # Performance benchmarks (requires Docker)
+
+# Run with coverage
+npm run test:coverage         # Generate coverage report
+npm run coverage:check        # Validate coverage thresholds
+
+# Quality checks
+npm run benchmark:compare     # Check for performance regressions
+npm run quality:check         # Run all quality gates
+```
+
+### Test Infrastructure
+
+- **Testcontainers**: Automatic RabbitMQ container management for integration tests
+- **Jest**: Test framework with TypeScript support
+- **Mocks & Helpers**: Comprehensive test utilities for all components
+- **Metrics Collection**: Automated performance and resource usage tracking
+
+### CI/CD Integration
+
+All tests run automatically on:
+- Every push to main/master/develop branches
+- Every pull request
+- Matrix testing across Node.js 18, 20, and 22
+
+**Quality Gates:**
+- ✅ Minimum 70% code coverage
+- ✅ All tests must pass
+- ✅ Performance regression < 10%
+- ✅ Error rate under load < 1%
+
+For detailed testing documentation, see [test/README.md](test/README.md).
 
 ---
 

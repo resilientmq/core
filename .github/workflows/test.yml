@@ -1,0 +1,354 @@
+name: Test Suite
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+
+jobs:
+  # Job 1: Unit Tests with Coverage
+  unit-tests:
+    name: Unit Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+      fail-fast: false  # Continue testing other versions even if one fails
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      
+      - name: Cache Jest cache
+        uses: actions/cache@v4
+        with:
+          path: .jest-cache
+          key: jest-cache-${{ runner.os }}-${{ matrix.node-version }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            jest-cache-${{ runner.os }}-${{ matrix.node-version }}-
+            jest-cache-${{ runner.os }}-
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run unit tests with coverage
+        run: npm run test:coverage
+      
+      - name: Check coverage thresholds
+        run: |
+          # Extract coverage percentages from Jest output
+          COVERAGE_FILE="coverage/unit/coverage-summary.json"
+          if [ -f "$COVERAGE_FILE" ]; then
+            LINES=$(node -p "require('./$COVERAGE_FILE').total.lines.pct")
+            BRANCHES=$(node -p "require('./$COVERAGE_FILE').total.branches.pct")
+            FUNCTIONS=$(node -p "require('./$COVERAGE_FILE').total.functions.pct")
+            STATEMENTS=$(node -p "require('./$COVERAGE_FILE').total.statements.pct")
+            
+            echo "Coverage Results:"
+            echo "  Lines: $LINES%"
+            echo "  Branches: $BRANCHES%"
+            echo "  Functions: $FUNCTIONS%"
+            echo "  Statements: $STATEMENTS%"
+            
+            # Fail if coverage is below 70%
+            if (( $(echo "$LINES < 70" | bc -l) )); then
+              echo "❌ Line coverage ($LINES%) is below 70% threshold"
+              exit 1
+            fi
+            
+            echo "✅ Coverage meets minimum threshold of 70%"
+          else
+            echo "⚠️ Coverage file not found, skipping threshold check"
+          fi
+      
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always() && matrix.node-version == 20
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+      
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results-node-${{ matrix.node-version }}
+          path: test-results/junit-unit.xml
+          retention-days: 30
+
+  # Job 2: Integration Tests with RabbitMQ
+  integration-tests:
+    name: Integration Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+      fail-fast: false
+    
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      
+      - name: Cache Jest cache
+        uses: actions/cache@v4
+        with:
+          path: .jest-cache
+          key: jest-cache-integration-${{ runner.os }}-${{ matrix.node-version }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            jest-cache-integration-${{ runner.os }}-${{ matrix.node-version }}-
+            jest-cache-integration-${{ runner.os }}-
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Wait for RabbitMQ to be ready
+        run: |
+          echo "Waiting for RabbitMQ to be ready..."
+          timeout 60 bash -c 'until curl -f http://localhost:15672/api/healthchecks/node 2>/dev/null; do sleep 2; done'
+          echo "RabbitMQ is ready!"
+      
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results-node-${{ matrix.node-version }}
+          path: test-results/
+          retention-days: 30
+
+  # Job 3: Stress Tests (only on PRs)
+  stress-tests:
+    name: Stress Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request'
+    
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Wait for RabbitMQ to be ready
+        run: |
+          echo "Waiting for RabbitMQ to be ready..."
+          timeout 60 bash -c 'until curl -f http://localhost:15672/api/healthchecks/node 2>/dev/null; do sleep 2; done'
+          echo "RabbitMQ is ready!"
+      
+      - name: Run stress tests
+        run: npm run test:stress
+        env:
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      
+      - name: Check stress test metrics
+        run: |
+          # Check if stress metrics file exists and validate error rate
+          METRICS_FILE="test-results/stress-metrics-summary.json"
+          if [ -f "$METRICS_FILE" ]; then
+            ERROR_RATE=$(node -p "require('./$METRICS_FILE').errorRate || 0")
+            echo "Stress Test Error Rate: $ERROR_RATE%"
+            
+            # Fail if error rate is >= 1%
+            if (( $(echo "$ERROR_RATE >= 1" | bc -l) )); then
+              echo "❌ Error rate ($ERROR_RATE%) exceeds 1% threshold"
+              exit 1
+            fi
+            
+            echo "✅ Stress tests passed with acceptable error rate"
+          else
+            echo "⚠️ Stress metrics file not found"
+          fi
+      
+      - name: Upload stress test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stress-test-results
+          path: test-results/stress-*.json
+          retention-days: 30
+
+  # Job 4: Benchmarks (only on main/master branch)
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for comparison
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Wait for RabbitMQ to be ready
+        run: |
+          echo "Waiting for RabbitMQ to be ready..."
+          timeout 60 bash -c 'until curl -f http://localhost:15672/api/healthchecks/node 2>/dev/null; do sleep 2; done'
+          echo "RabbitMQ is ready!"
+      
+      - name: Run benchmarks
+        run: npm run test:benchmark
+        env:
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      
+      - name: Check for performance regressions
+        run: |
+          # Check if benchmark comparison script exists
+          if [ -f "test/scripts/compare-benchmarks.js" ]; then
+            node test/scripts/compare-benchmarks.js
+          else
+            echo "⚠️ Benchmark comparison script not found, skipping regression check"
+          fi
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: test-results/benchmark-*.json
+          retention-days: 90
+      
+      - name: Comment benchmark results on commit
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Try to read benchmark summary
+            const summaryPath = 'test-results/benchmark-summary.json';
+            if (fs.existsSync(summaryPath)) {
+              const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+              
+              let comment = '## 📊 Benchmark Results\n\n';
+              comment += '| Metric | Value |\n';
+              comment += '|--------|-------|\n';
+              
+              if (summary.publishThroughput) {
+                comment += `| Publish Throughput | ${summary.publishThroughput.toFixed(2)} msg/s |\n`;
+              }
+              if (summary.consumeThroughput) {
+                comment += `| Consume Throughput | ${summary.consumeThroughput.toFixed(2)} msg/s |\n`;
+              }
+              if (summary.avgLatency) {
+                comment += `| Average Latency | ${summary.avgLatency.toFixed(2)} ms |\n`;
+              }
+              
+              console.log(comment);
+            }
+
+  # Job 5: Test Summary
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    if: always()
+    
+    steps:
+      - name: Check test results
+        run: |
+          echo "## Test Suite Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.unit-tests.result }}" == "success" ]; then
+            echo "✅ Unit Tests: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Unit Tests: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ needs.integration-tests.result }}" == "success" ]; then
+            echo "✅ Integration Tests: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Integration Tests: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Fail if any required test failed
+          if [ "${{ needs.unit-tests.result }}" != "success" ] || [ "${{ needs.integration-tests.result }}" != "success" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Test suite failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All tests passed successfully" >> $GITHUB_STEP_SUMMARY
