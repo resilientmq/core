@@ -3,6 +3,7 @@ import { AmqpQueue } from "../broker/amqp-queue";
 import { log } from "../logger/logger";
 import { EventMessage, RabbitMQResilientProcessorConfig, ResilientConsumerConfig } from "../types";
 
+
 export class ResilientConsumer {
     private processor!: ResilientEventConsumeProcessor;
     private queue!: AmqpQueue;

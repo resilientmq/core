@@ -335,7 +335,7 @@ npm run quality:check         # Run all quality gates
 All tests run automatically on:
 - Every push to main/master/develop branches
 - Every pull request
-- Matrix testing across Node.js 18, 20, and 22
+- Matrix testing across Node.js 18, 20, 22 and 24
 
 **Quality Gates:**
 - ✅ Minimum 70% code coverage
