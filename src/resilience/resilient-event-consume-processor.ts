@@ -111,40 +111,31 @@ export class ResilientEventConsumeProcessor {
                     
                     const dlqEvent: EventMessage = {
                         ...event,
+                        // Set routing key if exchange is configured
+                        routingKey: this.config.deadLetterQueue.exchange?.routingKey ?? event.routingKey,
                         properties: {
                             ...event.properties,
                             headers: {
                                 ...event.properties?.headers,
                                 'x-error-message': (err as Error).message,
                                 'x-error-name': (err as Error).name,
+                                'x-error-stack': (err as Error).stack || '',
                                 'x-death-count': currentAttempt,
                                 'x-death-reason': 'rejected',
                                 'x-death-time': new Date().toISOString(),
                                 'x-original-queue': this.config.consumeQueue.queue,
-                                'x-first-death-reason': 'rejected'
+                                'x-first-death-reason': 'rejected',
+                                'x-first-death-queue': this.config.consumeQueue.queue
                             }
                         }
                     };
                     
-                    // Publish to DLQ
-                    if (this.config.deadLetterQueue.exchange) {
-                        await this.config.broker.publish(
-                            this.config.deadLetterQueue.queue,
-                            dlqEvent,
-                            {
-                                exchange: {
-                                    name: this.config.deadLetterQueue.exchange.name,
-                                    type: this.config.deadLetterQueue.exchange.type,
-                                    options: this.config.deadLetterQueue.exchange.options
-                                }
-                            }
-                        );
-                    } else {
-                        await this.config.broker.publish(
-                            this.config.deadLetterQueue.queue,
-                            dlqEvent
-                        );
-                    }
+                    // Publish to DLQ using the same pattern as dlq-handler
+                    await this.config.broker.publish(
+                        this.config.deadLetterQueue.queue,
+                        dlqEvent,
+                        this.config.deadLetterQueue.exchange ? { exchange: this.config.deadLetterQueue.exchange } : undefined
+                    );
                     
                     log('info', `[Processor] Message ${event.messageId} sent to DLQ successfully`);
                     // Don't throw error - message was handled by sending to DLQ

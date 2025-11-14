@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2025-11-14
+
+### Fixed
+
+- **Dead Letter Queue (DLQ) Routing**: Fixed critical issue where messages that exceeded maximum retry attempts were not being routed to the DLQ
+  - Messages now correctly reach the DLQ after exhausting all retry attempts
+  - Implemented manual DLQ publishing when max attempts are exceeded to bypass RabbitMQ DLX limitations
+  - Added proper routing key handling for DLQ exchanges
+  - Enhanced error headers in DLQ messages with detailed failure information (`x-error-message`, `x-error-name`, `x-error-stack`, `x-death-count`, `x-death-time`, `x-original-queue`)
+  - Messages are now ACK'd after being sent to DLQ (preventing infinite retry loops)
+
+### Changed
+
+- **Processor Behavior on Max Attempts**: When a message exceeds `maxAttempts`, the processor now:
+  1. Updates event status to `ERROR` in the store
+  2. Calls the `onError` hook
+  3. Manually publishes the message to the DLQ (if configured)
+  4. ACKs the original message (instead of throwing an error)
+  - This ensures messages don't get stuck in the retry queue indefinitely
+
+### Technical Details
+
+- Modified `ResilientEventConsumeProcessor` to handle DLQ routing manually when max attempts are exceeded
+- Fixed routing key propagation for DLQ exchanges
+- Aligned DLQ publishing pattern with `dlq-handler` implementation for consistency
+- Updated unit tests to reflect new behavior (no error thrown when DLQ is configured and max attempts exceeded)
+
+## [1.2.1] - 2025-11-14
+
+### Added
+
+- **CI/CD Pipeline Unification**: Merged separate test and publish workflows into a single comprehensive CI/CD pipeline
+  - Unified workflow with proper job dependencies and conditional execution
+  - Added path filters to only run workflow on relevant file changes (`src/`, `test/`, `package.json`, `tsconfig.json`)
+  - Expanded Node.js version matrix to include Node.js 24
+  - Improved workflow organization with clear job separation (unit tests, integration tests, stress tests, benchmarks, build, publish)
+
+- **Static Badges**: Added informative badges to README for quick project status overview
+  - CI/CD status badge
+  - npm version badge
+  - Node.js versions badge (18, 20, 22, 24)
+  - TypeScript badge
+  - License badge
+
+### Fixed
+
+- **Timer Cleanup**: Fixed open handles in tests by properly tracking and cleaning up `idleMonitorTimer` in `ResilientConsumer`
+  - Added `idleMonitorTimer` property to track the idle monitor interval
+  - Ensured timer is cleared in `stopTimers()` method
+  - Resolved Jest `--detectOpenHandles` warnings
+
+- **Benchmark Tests**: Fixed multiple issues in benchmark tests
+  - Corrected handler signature mismatch (handlers receive `EventMessage` object, not just payload)
+  - Fixed duplicate detection issue by removing store from publisher in persistence benchmarks
+  - Fixed queue creation timing by ensuring consumer starts before publishing messages
+  - Updated imports to include `EventMessage` type
+
+### Changed
+
+- **Jest Configuration**: All Jest configs now include `detectOpenHandles: true` by default for better test hygiene
+- **Workflow Optimization**: Reduced unnecessary workflow runs through intelligent path filtering
+- **Documentation**: Updated workflow documentation in `.github/README.md`
+
+### Removed
+
+- Removed separate `test.yml` and `publish.yml` workflow files (consolidated into `ci-cd.yml`)
+- Removed dynamic badge implementation in favor of simpler static badges
+
 ## [1.2.0] - 2025-11-14
 
 ### Added
