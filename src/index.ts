@@ -1,4 +1,3 @@
-// Logging utility
 export * from './logger/logger';
 
 // Broker implementation (AMQP)

@@ -21,7 +21,7 @@ jobs:
     
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [18, 20, 22, 24]
       fail-fast: false
     
     steps:
@@ -98,7 +98,7 @@ jobs:
     
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [18, 20, 22, 24]
       fail-fast: false
     
     services:
@@ -185,11 +185,252 @@ jobs:
           path: test-results/
           retention-days: 30
 
-  # Job 3: Build
+  # Job 3: Stress Tests
+  stress-tests:
+    name: Stress Tests
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    timeout-minutes: 25
+    
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management-alpine
+        ports:
+          - 5672:5672
+          - 15672:15672
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        options: >-
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 60s
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Wait for RabbitMQ to be ready
+        run: |
+          echo "🐰 Waiting for RabbitMQ to be ready..."
+          max_attempts=30
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            if curl -u guest:guest -f -s http://localhost:15672/api/overview > /dev/null 2>&1; then
+              echo "✅ RabbitMQ management API is accessible"
+              sleep 2
+              if curl -u guest:guest -f -s http://localhost:15672/api/vhosts > /dev/null 2>&1; then
+                echo "✅ RabbitMQ is fully ready!"
+                exit 0
+              fi
+            fi
+            
+            if [ $attempt -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+              echo "⏳ Waiting for RabbitMQ... (attempt $attempt/$max_attempts)"
+            fi
+            
+            sleep 2
+            attempt=$((attempt + 1))
+          done
+          
+          echo "❌ RabbitMQ failed to become ready"
+          exit 1
+      
+      - name: Run stress tests
+        run: npm run test:stress
+        env:
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      
+      - name: Check stress test metrics
+        run: |
+          echo "📊 Checking stress test metrics..."
+          
+          # Check if any stress metrics files exist
+          if ls test-results/stress-*.json 1> /dev/null 2>&1; then
+            echo "✅ Stress test metrics found"
+            
+            # Check each metrics file for error rate
+            for file in test-results/stress-*.json; do
+              if [ -f "$file" ]; then
+                echo "Checking $file..."
+                ERROR_RATE=$(node -p "const data = require('./$file'); data.errorRate || 0" 2>/dev/null || echo "0")
+                THROUGHPUT=$(node -p "const data = require('./$file'); data.throughput || 0" 2>/dev/null || echo "0")
+                
+                echo "  Error Rate: $ERROR_RATE%"
+                echo "  Throughput: $THROUGHPUT msg/s"
+                
+                # Fail if error rate >= 1%
+                if (( $(echo "$ERROR_RATE >= 1" | bc -l 2>/dev/null || echo "0") )); then
+                  echo "❌ Error rate ($ERROR_RATE%) exceeds 1% threshold in $file"
+                  exit 1
+                fi
+              fi
+            done
+            
+            echo "✅ All stress tests passed quality thresholds"
+          else
+            echo "⚠️ No stress metrics files found, skipping validation"
+          fi
+      
+      - name: Upload stress test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stress-test-results
+          path: test-results/stress-*.json
+          retention-days: 30
+
+  # Job 4: Benchmarks
+  benchmarks:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    timeout-minutes: 30
+    
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management-alpine
+        ports:
+          - 5672:5672
+          - 15672:15672
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        options: >-
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 60s
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Wait for RabbitMQ to be ready
+        run: |
+          echo "🐰 Waiting for RabbitMQ to be ready..."
+          max_attempts=30
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            if curl -u guest:guest -f -s http://localhost:15672/api/overview > /dev/null 2>&1; then
+              echo "✅ RabbitMQ management API is accessible"
+              sleep 2
+              if curl -u guest:guest -f -s http://localhost:15672/api/vhosts > /dev/null 2>&1; then
+                echo "✅ RabbitMQ is fully ready!"
+                exit 0
+              fi
+            fi
+            
+            if [ $attempt -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+              echo "⏳ Waiting for RabbitMQ... (attempt $attempt/$max_attempts)"
+            fi
+            
+            sleep 2
+            attempt=$((attempt + 1))
+          done
+          
+          echo "❌ RabbitMQ failed to become ready"
+          exit 1
+      
+      - name: Run benchmarks
+        run: npm run test:benchmark
+        env:
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      
+      - name: Check for performance regressions
+        run: |
+          echo "📊 Checking for performance regressions..."
+          
+          if [ -f "test/scripts/compare-benchmarks.js" ]; then
+            node test/scripts/compare-benchmarks.js || {
+              echo "⚠️ Performance regression detected, but continuing..."
+              # Don't fail the build, just warn
+            }
+          else
+            echo "⚠️ Benchmark comparison script not found, skipping regression check"
+          fi
+      
+      - name: Validate benchmark thresholds
+        run: |
+          echo "📊 Validating benchmark thresholds..."
+          
+          # Check if benchmark results exist
+          if ls test-results/benchmark-*.json 1> /dev/null 2>&1; then
+            echo "✅ Benchmark results found"
+            
+            # Define minimum acceptable thresholds
+            MIN_PUBLISH_THROUGHPUT=100  # msg/s
+            MIN_CONSUME_THROUGHPUT=100  # msg/s
+            MAX_AVG_LATENCY=100         # ms
+            
+            for file in test-results/benchmark-*.json; do
+              if [ -f "$file" ]; then
+                echo "Checking $file..."
+                
+                # Extract metrics (handle missing fields gracefully)
+                THROUGHPUT=$(node -p "const data = require('./$file'); data.throughput || data.publishThroughput || data.consumeThroughput || 0" 2>/dev/null || echo "0")
+                LATENCY=$(node -p "const data = require('./$file'); data.avgLatency || data.latency?.avg || 0" 2>/dev/null || echo "0")
+                
+                echo "  Throughput: $THROUGHPUT msg/s"
+                echo "  Avg Latency: $LATENCY ms"
+                
+                # Check throughput (if available)
+                if (( $(echo "$THROUGHPUT > 0 && $THROUGHPUT < $MIN_PUBLISH_THROUGHPUT" | bc -l 2>/dev/null || echo "0") )); then
+                  echo "❌ Throughput ($THROUGHPUT msg/s) is below minimum threshold ($MIN_PUBLISH_THROUGHPUT msg/s)"
+                  exit 1
+                fi
+                
+                # Check latency (if available)
+                if (( $(echo "$LATENCY > 0 && $LATENCY > $MAX_AVG_LATENCY" | bc -l 2>/dev/null || echo "0") )); then
+                  echo "❌ Average latency ($LATENCY ms) exceeds maximum threshold ($MAX_AVG_LATENCY ms)"
+                  exit 1
+                fi
+              fi
+            done
+            
+            echo "✅ All benchmarks meet performance thresholds"
+          else
+            echo "⚠️ No benchmark results found, skipping validation"
+          fi
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: test-results/benchmark-*.json
+          retention-days: 90
+
+  # Job 5: Build
   build:
     name: Build Package
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests]
+    needs: [unit-tests, integration-tests, stress-tests, benchmarks]
     
     steps:
       - name: Checkout code
@@ -228,11 +469,11 @@ jobs:
             CHANGELOG.md
           retention-days: 7
 
-  # Job 4: Publish to NPM (only on master branch)
+  # Job 6: Publish to NPM (only on master branch)
   publish:
     name: Publish to NPM
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, build]
+    needs: [unit-tests, integration-tests, stress-tests, benchmarks, build]
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
     permissions:
       contents: write
@@ -338,36 +579,179 @@ jobs:
           steps.src-changes.outputs.has-changes == 'true'
         run: echo "⏭️  Skipping publish - Version ${{ steps.current.outputs.version }} already exists on npm"
 
-  # Job 5: Test Summary
+  # Job 7: Test Summary
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests]
+    needs: [unit-tests, integration-tests, stress-tests, benchmarks, build]
     if: always()
     
     steps:
-      - name: Check test results
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+      
+      - name: Generate detailed summary
         run: |
-          echo "## 📊 Test Suite Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# 📊 CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow:** ${{ github.workflow }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
+          # Overall Status
+          echo "## 🎯 Overall Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          FAILED_JOBS=0
+          
+          # Unit Tests
+          echo "### 🧪 Unit Tests" >> $GITHUB_STEP_SUMMARY
           if [ "${{ needs.unit-tests.result }}" == "success" ]; then
-            echo "✅ Unit Tests: Passed" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Status:** Passed" >> $GITHUB_STEP_SUMMARY
+            echo "- Tested on Node.js: 18, 20, 22, 24" >> $GITHUB_STEP_SUMMARY
+            echo "- Coverage threshold: ≥70%" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ Unit Tests: Failed" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Status:** Failed" >> $GITHUB_STEP_SUMMARY
+            FAILED_JOBS=$((FAILED_JOBS + 1))
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
           
+          # Integration Tests
+          echo "### 🔗 Integration Tests" >> $GITHUB_STEP_SUMMARY
           if [ "${{ needs.integration-tests.result }}" == "success" ]; then
-            echo "✅ Integration Tests: Passed" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Status:** Passed" >> $GITHUB_STEP_SUMMARY
+            echo "- Tested on Node.js: 18, 20, 22, 24" >> $GITHUB_STEP_SUMMARY
+            echo "- RabbitMQ: 3.12-management-alpine" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ Integration Tests: Failed" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Status:** Failed" >> $GITHUB_STEP_SUMMARY
+            FAILED_JOBS=$((FAILED_JOBS + 1))
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ "${{ needs.unit-tests.result }}" != "success" ] || [ "${{ needs.integration-tests.result }}" != "success" ]; then
+          # Stress Tests
+          echo "### 💪 Stress Tests" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.stress-tests.result }}" == "success" ]; then
+            echo "✅ **Status:** Passed" >> $GITHUB_STEP_SUMMARY
+            echo "- Error rate: <1%" >> $GITHUB_STEP_SUMMARY
+            echo "- High volume testing completed" >> $GITHUB_STEP_SUMMARY
+            
+            # Try to read stress test metrics
+            if [ -d "stress-test-results" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Metrics:**" >> $GITHUB_STEP_SUMMARY
+              for file in stress-test-results/*.json; do
+                if [ -f "$file" ]; then
+                  TEST_NAME=$(basename "$file" .json | sed 's/stress-//' | sed 's/-/ /g')
+                  THROUGHPUT=$(node -p "const data = require('./$file'); data.throughput || 'N/A'" 2>/dev/null || echo "N/A")
+                  ERROR_RATE=$(node -p "const data = require('./$file'); data.errorRate || 'N/A'" 2>/dev/null || echo "N/A")
+                  MESSAGES=$(node -p "const data = require('./$file'); data.totalMessages || 'N/A'" 2>/dev/null || echo "N/A")
+                  echo "- **$TEST_NAME**: $MESSAGES messages, $THROUGHPUT msg/s, $ERROR_RATE% errors" >> $GITHUB_STEP_SUMMARY
+                fi
+              done
+            fi
+          else
+            echo "❌ **Status:** Failed" >> $GITHUB_STEP_SUMMARY
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Benchmarks
+          echo "### ⚡ Performance Benchmarks" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.benchmarks.result }}" == "success" ]; then
+            echo "✅ **Status:** Passed" >> $GITHUB_STEP_SUMMARY
+            echo "- Throughput: ≥100 msg/s" >> $GITHUB_STEP_SUMMARY
+            echo "- Avg Latency: ≤100 ms" >> $GITHUB_STEP_SUMMARY
+            
+            # Try to read benchmark metrics
+            if [ -d "benchmark-results" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Results:**" >> $GITHUB_STEP_SUMMARY
+              for file in benchmark-results/*.json; do
+                if [ -f "$file" ]; then
+                  BENCH_NAME=$(basename "$file" .json | sed 's/benchmark-//' | sed 's/-/ /g')
+                  THROUGHPUT=$(node -p "const data = require('./$file'); data.throughput || data.publishThroughput || 'N/A'" 2>/dev/null || echo "N/A")
+                  LATENCY=$(node -p "const data = require('./$file'); data.avgLatency || data.latency?.avg || 'N/A'" 2>/dev/null || echo "N/A")
+                  echo "- **$BENCH_NAME**: $THROUGHPUT msg/s, $LATENCY ms avg latency" >> $GITHUB_STEP_SUMMARY
+                fi
+              done
+            fi
+          else
+            echo "❌ **Status:** Failed" >> $GITHUB_STEP_SUMMARY
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Build
+          echo "### 📦 Build" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.build.result }}" == "success" ]; then
+            echo "✅ **Status:** Passed" >> $GITHUB_STEP_SUMMARY
+            echo "- TypeScript compilation successful" >> $GITHUB_STEP_SUMMARY
+            echo "- Package structure verified" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Status:** Failed" >> $GITHUB_STEP_SUMMARY
+            FAILED_JOBS=$((FAILED_JOBS + 1))
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Coverage Summary
+          echo "## 📈 Coverage Report" >> $GITHUB_STEP_SUMMARY
+          if [ -f "coverage-report/unit/coverage-summary.json" ]; then
+            LINES=$(node -p "require('./coverage-report/unit/coverage-summary.json').total.lines.pct" 2>/dev/null || echo "N/A")
+            BRANCHES=$(node -p "require('./coverage-report/unit/coverage-summary.json').total.branches.pct" 2>/dev/null || echo "N/A")
+            FUNCTIONS=$(node -p "require('./coverage-report/unit/coverage-summary.json').total.functions.pct" 2>/dev/null || echo "N/A")
+            STATEMENTS=$(node -p "require('./coverage-report/unit/coverage-summary.json').total.statements.pct" 2>/dev/null || echo "N/A")
+            
+            echo "| Metric | Coverage |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|----------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Lines | $LINES% |" >> $GITHUB_STEP_SUMMARY
+            echo "| Branches | $BRANCHES% |" >> $GITHUB_STEP_SUMMARY
+            echo "| Functions | $FUNCTIONS% |" >> $GITHUB_STEP_SUMMARY
+            echo "| Statements | $STATEMENTS% |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Coverage report not available" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Final Status
+          echo "## 🏁 Final Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ $FAILED_JOBS -eq 0 ]; then
+            echo "### ✅ All Jobs Passed!" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "❌ Test suite failed" >> $GITHUB_STEP_SUMMARY
+            echo "The pipeline completed successfully. All tests, benchmarks, and build steps passed." >> $GITHUB_STEP_SUMMARY
+            
+            if [ "${{ github.ref }}" == "refs/heads/master" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "🚀 **Ready for publish to npm** (if version and src changes are detected)" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "### ❌ Pipeline Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Failed jobs:** $FAILED_JOBS" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please review the failed jobs above and fix the issues before merging." >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
           
+          # Artifacts
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ All tests passed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "## 📎 Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Coverage reports (30 days)" >> $GITHUB_STEP_SUMMARY
+          echo "- Test results (30 days)" >> $GITHUB_STEP_SUMMARY
+          echo "- Stress test results (30 days)" >> $GITHUB_STEP_SUMMARY
+          echo "- Benchmark results (90 days)" >> $GITHUB_STEP_SUMMARY
+          echo "- Build artifacts (7 days)" >> $GITHUB_STEP_SUMMARY

@@ -9,15 +9,18 @@ Pipeline unificado que maneja testing, build y publicación a npm.
 ### Jobs y Dependencias
 
 ```
-unit-tests (Node 18, 20, 22)
+unit-tests (Node 18, 20, 22, 24)
     ↓
-integration-tests (Node 18, 20, 22)
+integration-tests (Node 18, 20, 22, 24)
     ↓
-build (solo si tests pasan)
-    ↓
-publish (solo en master, si tests y build pasan)
-    ↓
-test-summary (siempre se ejecuta)
+    ├─→ stress-tests
+    └─→ benchmarks
+         ↓
+       build (solo si todos los tests pasan)
+         ↓
+      publish (solo en master, si todo pasa)
+         ↓
+    test-summary (siempre se ejecuta, con detalles completos)
 ```
 
 ### Triggers
@@ -28,25 +31,44 @@ test-summary (siempre se ejecuta)
 ### Jobs
 
 #### 1. Unit Tests
-- Ejecuta en Node.js 18, 20 y 22
+- Ejecuta en Node.js 18, 20, 22 y 24
 - Corre tests unitarios con cobertura
 - Verifica que la cobertura sea >= 70%
 - Sube reportes de cobertura y resultados
 
 #### 2. Integration Tests
-- Ejecuta en Node.js 18, 20 y 22
+- Ejecuta en Node.js 18, 20, 22 y 24
 - Levanta RabbitMQ como servicio
-- Espera hasta 120 segundos para que RabbitMQ esté listo
+- Espera hasta 60 segundos para que RabbitMQ esté listo
 - Corre tests de integración
 - Sube resultados de tests
 
-#### 3. Build
+#### 3. Stress Tests
 - Solo se ejecuta si unit-tests e integration-tests pasan
+- Levanta RabbitMQ como servicio
+- Ejecuta tests de estrés del sistema
+- Valida métricas de calidad:
+  - Error rate debe ser < 1%
+  - Throughput debe cumplir mínimos
+- Sube resultados de stress tests
+
+#### 4. Benchmarks
+- Solo se ejecuta si unit-tests e integration-tests pasan
+- Levanta RabbitMQ como servicio
+- Ejecuta benchmarks de rendimiento
+- Valida umbrales de performance:
+  - Throughput mínimo: 100 msg/s
+  - Latencia máxima promedio: 100 ms
+- Compara con benchmarks anteriores
+- Sube resultados de benchmarks
+
+#### 5. Build
+- Solo se ejecuta si todos los tests pasan (unit, integration, stress, benchmarks)
 - Compila el proyecto TypeScript
 - Verifica la estructura del paquete
 - Sube artefactos de build
 
-#### 4. Publish to NPM
+#### 6. Publish to NPM
 - **Solo se ejecuta en branch `master`**
 - **Solo si todos los tests y build pasan**
 - Descarga artefactos de build
@@ -58,9 +80,19 @@ test-summary (siempre se ejecuta)
   - ✅ La versión no existe en npm
   - ✅ Todos los tests pasaron
 
-#### 5. Test Summary
+#### 7. Test Summary
 - Siempre se ejecuta (incluso si hay fallos)
-- Genera resumen de resultados en GitHub
+- Descarga todos los artefactos generados
+- Genera resumen detallado con:
+  - **Información del workflow**: Branch, commit, trigger
+  - **Estado de cada job**: Unit, Integration, Stress, Benchmarks, Build
+  - **Métricas de stress tests**: Throughput, error rate, mensajes procesados
+  - **Resultados de benchmarks**: Throughput, latencia promedio
+  - **Reporte de cobertura**: Tabla con lines, branches, functions, statements
+  - **Resultado final**: Resumen de jobs fallidos y estado general
+  - **Lista de artefactos**: Disponibles para descarga
+- Falla si algún job requerido falló
+- Muestra mensaje de "Ready for publish" si está en master y todo pasó
 
 ### Variables de Entorno Requeridas
 
