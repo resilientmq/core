@@ -149,13 +149,6 @@ jobs:
             # Try to connect to management API
             if curl -u guest:guest -f -s http://localhost:15672/api/overview > /dev/null 2>&1; then
               echo "✅ RabbitMQ management API is accessible"
-              
-              # Verify AMQP port is also ready
-              if curl -f -s http://localhost:15672/api/healthchecks/node > /dev/null 2>&1; then
-                echo "✅ RabbitMQ health check passed"
-                echo "✅ RabbitMQ is fully ready!"
-                exit 0
-              fi
             fi
             
             if [ $((attempt % 10)) -eq 0 ]; then
