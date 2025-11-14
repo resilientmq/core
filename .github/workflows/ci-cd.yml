@@ -142,30 +142,34 @@ jobs:
       - name: Wait for RabbitMQ to be ready
         run: |
           echo "🐰 Waiting for RabbitMQ to be ready..."
-          max_attempts=60
+          max_attempts=30
           attempt=1
           
           while [ $attempt -le $max_attempts ]; do
             # Try to connect to management API
             if curl -u guest:guest -f -s http://localhost:15672/api/overview > /dev/null 2>&1; then
               echo "✅ RabbitMQ management API is accessible"
+              
+              # Give it a moment and verify it's stable
+              sleep 2
+              
+              if curl -u guest:guest -f -s http://localhost:15672/api/vhosts > /dev/null 2>&1; then
+                echo "✅ RabbitMQ is fully ready!"
+                exit 0
+              fi
             fi
             
-            if [ $((attempt % 10)) -eq 0 ]; then
-              echo "⏳ Still waiting... (attempt $attempt/$max_attempts, elapsed: $((attempt * 2))s)"
+            if [ $attempt -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+              echo "⏳ Waiting for RabbitMQ... (attempt $attempt/$max_attempts)"
             fi
             
             sleep 2
             attempt=$((attempt + 1))
           done
           
-          echo "❌ RabbitMQ failed to become ready after 120 seconds"
-          echo "📋 Debugging information:"
-          echo "Container status:"
+          echo "❌ RabbitMQ failed to become ready after 60 seconds"
+          echo "📋 Container status:"
           docker ps -a | grep rabbitmq || echo "No RabbitMQ container found"
-          echo ""
-          echo "Trying to curl management API:"
-          curl -v http://localhost:15672/ 2>&1 || echo "Failed to connect"
           exit 1
       
       - name: Run integration tests
