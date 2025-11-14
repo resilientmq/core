@@ -1,5 +1,11 @@
 # @resilientmq/core
 
+[![CI/CD Pipeline](https://github.com/resilientmq/core/actions/workflows/ci-cd.yml/badge.svg?branch=master)](https://github.com/resilientmq/core/actions/workflows/ci-cd.yml)
+[![npm version](https://badge.fury.io/js/@resilientmq%2Fcore.svg)](https://www.npmjs.com/package/@resilientmq/core)
+[![Node.js Version](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-brightgreen.svg)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)](https://www.typescriptlang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Core logic for the resilient message queue system built on top of RabbitMQ, providing middleware support, retry logic, dead-letter handling, and persistent event lifecycle management.
 
 ## Table of Contents
@@ -364,3 +370,6 @@ For detailed testing documentation, see [test/README.md](test/README.md).
 ## 📄 License
 
 [MIT](LICENSE)
+
+
+

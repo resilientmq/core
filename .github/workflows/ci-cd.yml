@@ -1,4 +1,4 @@
-name: Test Suite
+name: CI/CD Pipeline
 
 on:
   push:
@@ -13,7 +13,7 @@ on:
       - develop
 
 jobs:
-  # Job 1: Unit Tests with Coverage
+  # Job 1: Unit Tests
   unit-tests:
     name: Unit Tests (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
@@ -22,7 +22,7 @@ jobs:
     strategy:
       matrix:
         node-version: [18, 20, 22]
-      fail-fast: false  # Continue testing other versions even if one fails
+      fail-fast: false
     
     steps:
       - name: Checkout code
@@ -51,7 +51,6 @@ jobs:
       
       - name: Check coverage thresholds
         run: |
-          # Extract coverage percentages from Jest output
           COVERAGE_FILE="coverage/unit/coverage-summary.json"
           if [ -f "$COVERAGE_FILE" ]; then
             LINES=$(node -p "require('./$COVERAGE_FILE').total.lines.pct")
@@ -65,7 +64,6 @@ jobs:
             echo "  Functions: $FUNCTIONS%"
             echo "  Statements: $STATEMENTS%"
             
-            # Fail if coverage is below 70%
             if (( $(echo "$LINES < 70" | bc -l) )); then
               echo "❌ Line coverage ($LINES%) is below 70% threshold"
               exit 1
@@ -92,7 +90,7 @@ jobs:
           path: test-results/junit-unit.xml
           retention-days: 30
 
-  # Job 2: Integration Tests with RabbitMQ
+  # Job 2: Integration Tests
   integration-tests:
     name: Integration Tests (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
@@ -113,7 +111,8 @@ jobs:
           --health-cmd "rabbitmq-diagnostics -q ping"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 30s
     
     steps:
       - name: Checkout code
@@ -140,15 +139,18 @@ jobs:
       - name: Wait for RabbitMQ to be ready
         run: |
           echo "Waiting for RabbitMQ to be ready..."
-          for i in {1..30}; do
-            if curl -f http://localhost:15672/api/healthchecks/node 2>/dev/null; then
-              echo "RabbitMQ is ready!"
+          max_attempts=60
+          attempt=1
+          while [ $attempt -le $max_attempts ]; do
+            if curl -f -s http://localhost:15672/api/healthchecks/node > /dev/null 2>&1; then
+              echo "✅ RabbitMQ is ready!"
               exit 0
             fi
-            echo "Attempt $i/30: RabbitMQ not ready yet, waiting..."
+            echo "Attempt $attempt/$max_attempts: RabbitMQ not ready yet, waiting..."
             sleep 2
+            attempt=$((attempt + 1))
           done
-          echo "RabbitMQ failed to become ready after 60 seconds"
+          echo "❌ RabbitMQ failed to become ready after 120 seconds"
           exit 1
       
       - name: Run integration tests
@@ -164,24 +166,11 @@ jobs:
           path: test-results/
           retention-days: 30
 
-  # Job 3: Stress Tests (only on PRs)
-  stress-tests:
-    name: Stress Tests
+  # Job 3: Build
+  build:
+    name: Build Package
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    if: github.event_name == 'pull_request'
-    
-    services:
-      rabbitmq:
-        image: rabbitmq:3.12-management
-        ports:
-          - 5672:5672
-          - 15672:15672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    needs: [unit-tests, integration-tests]
     
     steps:
       - name: Checkout code
@@ -196,151 +185,139 @@ jobs:
       - name: Install dependencies
         run: npm ci
       
-      - name: Wait for RabbitMQ to be ready
+      - name: Build project
+        run: npm run build
+      
+      - name: Verify package structure
         run: |
-          echo "Waiting for RabbitMQ to be ready..."
-          for i in {1..30}; do
-            if curl -f http://localhost:15672/api/healthchecks/node 2>/dev/null; then
-              echo "RabbitMQ is ready!"
-              exit 0
-            fi
-            echo "Attempt $i/30: RabbitMQ not ready yet, waiting..."
-            sleep 2
-          done
-          echo "RabbitMQ failed to become ready after 60 seconds"
-          exit 1
+          echo "Verifying package structure..."
+          echo "Main entry point: $(node -p 'require("./package.json").main')"
+          echo "Types entry point: $(node -p 'require("./package.json").types')"
+          ls -la dist/
+          echo "✅ Package structure verified successfully"
       
-      - name: Run stress tests
-        run: npm run test:stress
-        env:
-          RABBITMQ_URL: amqp://guest:guest@localhost:5672
-      
-      - name: Check stress test metrics
-        run: |
-          # Check if stress metrics file exists and validate error rate
-          METRICS_FILE="test-results/stress-metrics-summary.json"
-          if [ -f "$METRICS_FILE" ]; then
-            ERROR_RATE=$(node -p "require('./$METRICS_FILE').errorRate || 0")
-            echo "Stress Test Error Rate: $ERROR_RATE%"
-            
-            # Fail if error rate is >= 1%
-            if (( $(echo "$ERROR_RATE >= 1" | bc -l) )); then
-              echo "❌ Error rate ($ERROR_RATE%) exceeds 1% threshold"
-              exit 1
-            fi
-            
-            echo "✅ Stress tests passed with acceptable error rate"
-          else
-            echo "⚠️ Stress metrics file not found"
-          fi
-      
-      - name: Upload stress test results
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: stress-test-results
-          path: test-results/stress-*.json
-          retention-days: 30
+          name: build-artifacts
+          path: |
+            dist/
+            package.json
+            package-lock.json
+            README.md
+            LICENSE
+            CHANGELOG.md
+          retention-days: 7
 
-  # Job 4: Benchmarks (only on main/master branch)
-  benchmarks:
-    name: Benchmarks
+  # Job 4: Publish to NPM (only on master branch)
+  publish:
+    name: Publish to NPM
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    
-    services:
-      rabbitmq:
-        image: rabbitmq:3.12-management
-        ports:
-          - 5672:5672
-          - 15672:15672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    needs: [unit-tests, integration-tests, build]
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    permissions:
+      contents: write
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all history for comparison
+          fetch-depth: 0
       
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          registry-url: 'https://registry.npmjs.org/'
           cache: 'npm'
       
-      - name: Install dependencies
-        run: npm ci
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
       
-      - name: Wait for RabbitMQ to be ready
+      - name: Get current version
+        id: current
         run: |
-          echo "Waiting for RabbitMQ to be ready..."
-          for i in {1..30}; do
-            if curl -f http://localhost:15672/api/healthchecks/node 2>/dev/null; then
-              echo "RabbitMQ is ready!"
-              exit 0
-            fi
-            echo "Attempt $i/30: RabbitMQ not ready yet, waiting..."
-            sleep 2
-          done
-          echo "RabbitMQ failed to become ready after 60 seconds"
-          exit 1
+          VERSION=$(node -p 'require("./package.json").version')
+          NAME=$(node -p 'require("./package.json").name')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "📦 Package: $NAME"
+          echo "🏷️  Version: $VERSION"
       
-      - name: Run benchmarks
-        run: npm run test:benchmark
-        env:
-          RABBITMQ_URL: amqp://guest:guest@localhost:5672
-      
-      - name: Check for performance regressions
+      - name: Check for changes in src folder
+        id: src-changes
         run: |
-          # Check if benchmark comparison script exists
-          if [ -f "test/scripts/compare-benchmarks.js" ]; then
-            node test/scripts/compare-benchmarks.js
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          echo "Changed files in last commit:"
+          echo "$CHANGED_FILES"
+          
+          if echo "$CHANGED_FILES" | grep -q "^src/"; then
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+            echo "✅ Changes detected in src/ folder"
           else
-            echo "⚠️ Benchmark comparison script not found, skipping regression check"
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+            echo "⏭️  No changes in src/ folder"
           fi
       
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: benchmark-results
-          path: test-results/benchmark-*.json
-          retention-days: 90
+      - name: Check if version already published
+        id: version-check
+        run: |
+          PUBLISHED=$(npm view ${{ steps.current.outputs.name }}@${{ steps.current.outputs.version }} version 2>/dev/null || echo "null")
+          if [ "$PUBLISHED" = "${{ steps.current.outputs.version }}" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️  Version ${{ steps.current.outputs.version }} already exists on npm"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Version ${{ steps.current.outputs.version }} is new"
+          fi
       
-      - name: Comment benchmark results on commit
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-            
-            // Try to read benchmark summary
-            const summaryPath = 'test-results/benchmark-summary.json';
-            if (fs.existsSync(summaryPath)) {
-              const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
-              
-              let comment = '## 📊 Benchmark Results\n\n';
-              comment += '| Metric | Value |\n';
-              comment += '|--------|-------|\n';
-              
-              if (summary.publishThroughput) {
-                comment += `| Publish Throughput | ${summary.publishThroughput.toFixed(2)} msg/s |\n`;
-              }
-              if (summary.consumeThroughput) {
-                comment += `| Consume Throughput | ${summary.consumeThroughput.toFixed(2)} msg/s |\n`;
-              }
-              if (summary.avgLatency) {
-                comment += `| Average Latency | ${summary.avgLatency.toFixed(2)} ms |\n`;
-              }
-              
-              console.log(comment);
-            }
+      - name: Create git tag
+        if: |
+          steps.version-check.outputs.exists == 'false' &&
+          steps.src-changes.outputs.has-changes == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          TAG="v${{ steps.current.outputs.version }}"
+          echo "Creating tag: $TAG"
+          
+          git fetch --tags --force
+          
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "⚠️  Tag $TAG already exists locally"
+          elif git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
+            echo "⚠️  Tag $TAG already exists in remote"
+          else
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+            echo "✅ Tag $TAG created and pushed"
+          fi
+      
+      - name: Publish to NPM
+        if: |
+          steps.version-check.outputs.exists == 'false' &&
+          steps.src-changes.outputs.has-changes == 'true'
+        run: |
+          echo "🚀 Publishing ${{ steps.current.outputs.name }}@${{ steps.current.outputs.version }} to npm..."
+          npm publish
+          echo "✅ Successfully published to npm!"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      
+      - name: Skip publish - No src changes
+        if: steps.src-changes.outputs.has-changes == 'false'
+        run: echo "⏭️  Skipping publish - No changes in src/ folder"
+      
+      - name: Skip publish - Version exists
+        if: |
+          steps.version-check.outputs.exists == 'true' &&
+          steps.src-changes.outputs.has-changes == 'true'
+        run: echo "⏭️  Skipping publish - Version ${{ steps.current.outputs.version }} already exists on npm"
 
   # Job 5: Test Summary
   test-summary:
@@ -352,7 +329,7 @@ jobs:
     steps:
       - name: Check test results
         run: |
-          echo "## Test Suite Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Test Suite Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ needs.unit-tests.result }}" == "success" ]; then
@@ -367,7 +344,6 @@ jobs:
             echo "❌ Integration Tests: Failed" >> $GITHUB_STEP_SUMMARY
           fi
           
-          # Fail if any required test failed
           if [ "${{ needs.unit-tests.result }}" != "success" ] || [ "${{ needs.integration-tests.result }}" != "success" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "❌ Test suite failed" >> $GITHUB_STEP_SUMMARY

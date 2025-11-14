@@ -1,208 +1,96 @@
-# GitHub Actions Workflows
+# GitHub Workflows
 
-This directory contains the CI/CD workflows for @resilientmq/core.
+Este directorio contiene los workflows de GitHub Actions para CI/CD automatizado.
 
-## Workflows
+## Workflow: CI/CD Pipeline (`ci-cd.yml`)
 
-### test.yml - Automated Testing Pipeline
+Pipeline unificado que maneja testing, build y publicación a npm.
 
-Comprehensive test suite that runs on every push and pull request.
+### Jobs y Dependencias
 
-**Jobs:**
-
-1. **Unit Tests** (Matrix: Node 18, 20, 22)
-   - Runs unit tests with coverage
-   - Enforces 70% minimum coverage threshold
-   - Uploads coverage reports and test results
-   - Timeout: 10 minutes
-
-2. **Integration Tests** (Matrix: Node 18, 20, 22)
-   - Tests with real RabbitMQ instance
-   - Uses GitHub Actions services for RabbitMQ
-   - Validates end-to-end functionality
-   - Timeout: 15 minutes
-
-3. **Stress Tests** (Conditional: PRs only)
-   - High-volume and high-speed testing
-   - Validates system under load
-   - Checks error rate < 1%
-   - Timeout: 20 minutes
-
-4. **Benchmarks** (Conditional: main/master branch only)
-   - Performance benchmarking
-   - Regression detection (> 10% threshold)
-   - Results stored for 90 days
-   - Timeout: 25 minutes
-
-5. **Test Summary**
-   - Aggregates results from all jobs
-   - Provides quick overview in GitHub UI
-   - Fails if any required test fails
-
-**Triggers:**
-- Push to main, master, or develop branches
-- Pull requests to main, master, or develop branches
-
-**Optimizations:**
-- npm dependency caching
-- Jest cache for faster test execution
-- Parallel execution across Node versions
-- Conditional job execution
-
-### publish.yml - NPM Publishing
-
-Automatically publishes to NPM when version changes on master branch.
-
-**Features:**
-- Version change detection
-- Duplicate publish prevention
-- Automatic git tagging
-- Build artifact preparation
-
-## Quality Gates
-
-### Coverage Requirements
-- Lines: ≥ 70%
-- Branches: ≥ 70%
-- Functions: ≥ 75%
-- Statements: ≥ 75%
-
-### Performance Requirements
-- Error rate in stress tests: < 1%
-- Benchmark regression: < 10%
-- No memory leaks detected
-
-### Test Requirements
-- All unit tests must pass
-- All integration tests must pass
-- Tests must complete within timeout limits
-
-## Scripts
-
-### check-coverage.js
-Validates code coverage against minimum thresholds.
-
-```bash
-npm run coverage:check
+```
+unit-tests (Node 18, 20, 22)
+    ↓
+integration-tests (Node 18, 20, 22)
+    ↓
+build (solo si tests pasan)
+    ↓
+publish (solo en master, si tests y build pasan)
+    ↓
+test-summary (siempre se ejecuta)
 ```
 
-### compare-benchmarks.js
-Compares current benchmarks against baseline to detect regressions.
+### Triggers
 
-```bash
-npm run benchmark:compare
-```
+- **Push** a branches: `main`, `master`, `develop`
+- **Pull Request** a branches: `main`, `master`, `develop`
 
-## Artifacts
+### Jobs
 
-### Coverage Reports
-- Format: HTML, LCOV, JSON
-- Location: `coverage/` directory
-- Retention: 30 days
-- Uploaded from: Node 20 only
+#### 1. Unit Tests
+- Ejecuta en Node.js 18, 20 y 22
+- Corre tests unitarios con cobertura
+- Verifica que la cobertura sea >= 70%
+- Sube reportes de cobertura y resultados
 
-### Test Results
-- Format: JUnit XML
-- Location: `test-results/` directory
-- Retention: 30 days
-- Uploaded from: All Node versions
+#### 2. Integration Tests
+- Ejecuta en Node.js 18, 20 y 22
+- Levanta RabbitMQ como servicio
+- Espera hasta 120 segundos para que RabbitMQ esté listo
+- Corre tests de integración
+- Sube resultados de tests
 
-### Benchmark Results
-- Format: JSON
-- Location: `test-results/benchmark-*.json`
-- Retention: 90 days
-- Uploaded from: main/master branch only
+#### 3. Build
+- Solo se ejecuta si unit-tests e integration-tests pasan
+- Compila el proyecto TypeScript
+- Verifica la estructura del paquete
+- Sube artefactos de build
 
-## Local Development
+#### 4. Publish to NPM
+- **Solo se ejecuta en branch `master`**
+- **Solo si todos los tests y build pasan**
+- Descarga artefactos de build
+- Verifica cambios en carpeta `src/`
+- Verifica si la versión ya existe en npm
+- Crea tag de git si es necesario
+- Publica a npm si:
+  - ✅ Hay cambios en `src/`
+  - ✅ La versión no existe en npm
+  - ✅ Todos los tests pasaron
 
-Run the same checks locally before pushing:
+#### 5. Test Summary
+- Siempre se ejecuta (incluso si hay fallos)
+- Genera resumen de resultados en GitHub
 
-```bash
-# Unit tests with coverage
-npm run test:coverage
-npm run coverage:check
+### Variables de Entorno Requeridas
 
-# Integration tests (requires Docker)
-npm run test:integration
+#### Secrets
+- `NPM_TOKEN`: Token de npm para publicación (solo para job de publish)
+- `GITHUB_TOKEN`: Automáticamente provisto por GitHub Actions
 
-# Stress tests (requires Docker)
-npm run test:stress
+### Configuración de RabbitMQ
 
-# Benchmarks (requires Docker)
-npm run test:benchmark
-npm run benchmark:compare
+Los integration tests usan RabbitMQ como servicio con:
+- Puerto AMQP: 5672
+- Puerto Management: 15672
+- Health checks cada 10s
+- Timeout de 5s
+- 10 reintentos
+- Start period de 30s
 
-# All tests
-npm run test:all
-```
+### Artefactos Generados
 
-## Troubleshooting
+- **coverage-report**: Reportes de cobertura (30 días)
+- **unit-test-results**: Resultados de tests unitarios (30 días)
+- **integration-test-results**: Resultados de tests de integración (30 días)
+- **build-artifacts**: Archivos compilados (7 días)
 
-### Tests Failing in CI but Passing Locally
+### Notas
 
-1. Check Node version compatibility
-2. Verify Docker/RabbitMQ availability
-3. Check for timing-dependent tests
-4. Review CI logs for environment differences
+- Los tests unitarios no requieren RabbitMQ
+- Los tests de integración esperan hasta 120 segundos para RabbitMQ
+- El publish solo ocurre en `master` después de que todos los tests pasen
+- Si no hay cambios en `src/`, no se publica aunque la versión sea nueva
 
-### Coverage Below Threshold
 
-1. Run `npm run test:coverage` locally
-2. Check coverage report in `coverage/unit/index.html`
-3. Add tests for uncovered code
-4. Verify coverage configuration in `jest.config.unit.js`
 
-### Benchmark Regressions
-
-1. Run `npm run test:benchmark` locally
-2. Compare with baseline in `test-results/benchmark-baseline.json`
-3. Investigate performance changes
-4. Update baseline if regression is intentional
-
-### Timeout Issues
-
-1. Check for hanging processes
-2. Review test logs for slow operations
-3. Consider increasing timeout in workflow
-4. Optimize slow tests
-
-## Maintenance
-
-### Updating Node Versions
-
-Edit the matrix in `.github/workflows/test.yml`:
-
-```yaml
-strategy:
-  matrix:
-    node-version: [18, 20, 22]  # Update versions here
-```
-
-### Adjusting Timeouts
-
-Edit timeout values in workflow jobs:
-
-```yaml
-timeout-minutes: 10  # Adjust as needed
-```
-
-### Updating Coverage Thresholds
-
-Edit `test/jest.config.unit.js`:
-
-```javascript
-coverageThreshold: {
-  global: {
-    branches: 70,
-    functions: 75,
-    lines: 75,
-    statements: 75
-  }
-}
-```
-
-## References
-
-- [CI Optimization Guide](./CI-OPTIMIZATION.md)
-- [Test Documentation](../test/README.md)
-- [GitHub Actions Documentation](https://docs.github.com/en/actions)
