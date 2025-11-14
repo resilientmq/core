@@ -139,9 +139,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
       
-      - name: Install netcat for health check
-        run: sudo apt-get update && sudo apt-get install -y netcat
-      
       - name: Wait for RabbitMQ to be ready
         run: |
           echo "🐰 Waiting for RabbitMQ to be ready..."
@@ -149,27 +146,20 @@ jobs:
           attempt=1
           
           while [ $attempt -le $max_attempts ]; do
-            # Check AMQP port
-            if nc -z localhost 5672 2>/dev/null; then
-              echo "✅ AMQP port (5672) is accessible"
+            # Try to connect to management API
+            if curl -u guest:guest -f -s http://localhost:15672/api/overview > /dev/null 2>&1; then
+              echo "✅ RabbitMQ management API is accessible"
               
-              # Check Management port
-              if nc -z localhost 15672 2>/dev/null; then
-                echo "✅ Management port (15672) is accessible"
-                
-                # Give it a few more seconds to fully initialize
-                sleep 3
-                
-                # Final check with management API
-                if curl -u guest:guest -f -s http://localhost:15672/api/overview > /dev/null 2>&1; then
-                  echo "✅ RabbitMQ is fully ready!"
-                  exit 0
-                fi
+              # Verify AMQP port is also ready
+              if curl -f -s http://localhost:15672/api/healthchecks/node > /dev/null 2>&1; then
+                echo "✅ RabbitMQ health check passed"
+                echo "✅ RabbitMQ is fully ready!"
+                exit 0
               fi
             fi
             
             if [ $((attempt % 10)) -eq 0 ]; then
-              echo "⏳ Still waiting... (attempt $attempt/$max_attempts)"
+              echo "⏳ Still waiting... (attempt $attempt/$max_attempts, elapsed: $((attempt * 2))s)"
             fi
             
             sleep 2
@@ -177,8 +167,12 @@ jobs:
           done
           
           echo "❌ RabbitMQ failed to become ready after 120 seconds"
-          echo "📋 Container status:"
+          echo "📋 Debugging information:"
+          echo "Container status:"
           docker ps -a | grep rabbitmq || echo "No RabbitMQ container found"
+          echo ""
+          echo "Trying to curl management API:"
+          curl -v http://localhost:15672/ 2>&1 || echo "Failed to connect"
           exit 1
       
       - name: Run integration tests
