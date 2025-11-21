@@ -51,7 +51,7 @@ export class ResilientConsumer {
 
                 // Intentar una operación simple para verificar la conexión
                 const testEvent: EventMessage = {
-                    messageId: `__health_check_${Date.now()}__`,
+                    messageId: '8f747bb4-ca0a-4ef7-b479-d9183db942eb',
                     type: '__health_check__',
                     payload: {}
                 };
@@ -108,15 +108,15 @@ export class ResilientConsumer {
         if (this.config.deadLetterQueue) {
             const { queue: dlqName, exchange: dlqExchange, options: dlqOptions } = this.config.deadLetterQueue;
             log('debug', `[Consumer] Setting up dead letter queue: ${dlqName}`);
-            
+
             if (dlqExchange) {
                 dlqExchangeName = dlqExchange.name;
                 log('debug', `[Consumer] Asserting DLQ exchange: ${dlqExchange.name}`);
                 await this.queue.channel.assertExchange(dlqExchange.name, dlqExchange.type, dlqExchange.options);
             }
-            
+
             await this.queue.channel.assertQueue(dlqName, dlqOptions);
-            
+
             if (dlqExchange) {
                 await this.queue.channel.bindQueue(dlqName, dlqExchange.name, dlqExchange.routingKey ?? "");
             }
@@ -128,13 +128,13 @@ export class ResilientConsumer {
             const { queue: retryQueueName, exchange: retryExchange, options: retryOptions } = this.config.retryQueue;
             const ttl = this.config.retryQueue.ttlMs ?? 5000;
             const maxAttempts = this.config.retryQueue.maxAttempts ?? 3;
-            
+
             log('debug', `[Consumer] Setting up retry queue: ${retryQueueName} (TTL: ${ttl}ms, max attempts: ${maxAttempts})`);
 
             // Determine where retry queue should send messages after TTL
             let retryDlxExchange = '';
             let retryDlxRoutingKey = '';
-            
+
             if (exchanges?.length) {
                 // With exchanges: send back to main exchange
                 const mainExchange = exchanges.find((e: any) => e.routingKey) || exchanges[0];
@@ -172,7 +172,7 @@ export class ResilientConsumer {
 
         // Setup main queue with DLX to retry or DLQ
         const mainQueueArgs: any = { ...options?.arguments };
-        
+
         if (this.config.retryQueue) {
             // Main queue sends failed messages to retry queue
             if (retryExchangeName) {
@@ -422,11 +422,11 @@ export class ResilientConsumer {
      */
     public async stop(): Promise<void> {
         log('info', '[Consumer] Stopping consumer...');
-        
+
         await this.waitForProcessing();
-        
+
         this.stopTimers();
-        
+
         try {
             if (this.queue && !this.queue.closed) {
                 await this.queue.cancelAllConsumers();
@@ -435,7 +435,7 @@ export class ResilientConsumer {
         } catch (error) {
             log('error', '[Consumer] Error during stop', error);
         }
-        
+
         log('info', '[Consumer] Consumer stopped');
     }
 }
