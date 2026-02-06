@@ -41,35 +41,31 @@ export class ResilientEventConsumeProcessor {
                 existing = await this.config.store.getEvent(event);
             }
 
+            const match = this.config.eventsToProcess.find(e => e.type === event.type);
             if (existing && attempts === 0) {
                 log('warn', `[Processor] Duplicate event detected: ${event.messageId}, skipping`);
                 return;
             } else if (existing) {
                 log('debug', `[Processor] Updating existing event ${event.messageId} status in store`);
                 if (this.config.store) await this.config.store.updateEventStatus(event, event.status as EventConsumeStatus);
-            } else {
+            } else if (match || !this.config.ignoreUnknownEvents) {
                 log('debug', `[Processor] Saving new event ${event.messageId} to store`);
                 if (this.config.store) await this.config.store.saveEvent(event);
             }
 
-            const match = this.config.eventsToProcess.find(e => e.type === event.type);
             if (!match) {
-                log('warn', `[Processor] No handler for event type: ${event.type}`);
-                if (!this.config.ignoreUnknownEvents) {
-                    if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
-                } else {
-                    if (this.config.store) await this.config.store.deleteEvent(event);
-                }
+                log('info', `[Processor] No handler for event type: ${event.type}`);
+                if (!this.config.ignoreUnknownEvents && this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
                 return;
             }
 
             const runner = async () => {
                 log('debug', `[Processor] Updating event ${event.messageId} status to PROCESSING`);
                 if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
-                
+
                 log('debug', `[Processor] Executing handler for event ${event.messageId}`);
                 await match.handler(event);
-                
+
                 log('debug', `[Processor] Handler completed successfully for event ${event.messageId}`);
                 if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
                 this.config.events?.onSuccess?.(event);
@@ -86,7 +82,7 @@ export class ResilientEventConsumeProcessor {
 
         } catch (err) {
             log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
-            
+
             const maxAttempts = this.config.retryQueue?.maxAttempts ?? 3;
             const currentAttempt = attempts + 1;
 
@@ -95,20 +91,20 @@ export class ResilientEventConsumeProcessor {
             // Check if we've exceeded max attempts
             if (currentAttempt >= maxAttempts) {
                 log('warn', `[Processor] Max attempts (${maxAttempts}) reached for message ${event.messageId}`);
-                
+
                 // Update status to ERROR in store
                 if (this.config.store) {
                     log('debug', `[Processor] Updating event ${event.messageId} status to ERROR in store`);
                     await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
                 }
-                
+
                 // Call error hook
                 this.config.events?.onError?.(event, err as Error);
-                
+
                 // If DLQ is configured, send message to DLQ manually
                 if (this.config.deadLetterQueue) {
                     log('info', `[Processor] Sending message ${event.messageId} to DLQ`);
-                    
+
                     const dlqEvent: EventMessage = {
                         ...event,
                         // Set routing key if exchange is configured
@@ -129,36 +125,36 @@ export class ResilientEventConsumeProcessor {
                             }
                         }
                     };
-                    
+
                     // Publish to DLQ using the same pattern as dlq-handler
                     await this.config.broker.publish(
                         this.config.deadLetterQueue.queue,
                         dlqEvent,
                         this.config.deadLetterQueue.exchange ? { exchange: this.config.deadLetterQueue.exchange } : undefined
                     );
-                    
+
                     log('info', `[Processor] Message ${event.messageId} sent to DLQ successfully`);
                     // Don't throw error - message was handled by sending to DLQ
                     // This will cause the message to be ACK'd
                     return;
                 }
-                
+
                 // No DLQ configured, re-throw the error
                 log('info', `[Processor] Re-throwing error for message ${event.messageId} (no DLQ configured)`);
                 throw err;
             } else {
                 // Still have retries left
-                log('info', `[Processor] Message ${event.messageId} will be retried (attempt ${currentAttempt}/${maxAttempts})`);
-                
+                log('warn', `[Processor] Message ${event.messageId} will be retried (attempt ${currentAttempt}/${maxAttempts})`);
+
                 // Update status to RETRY in store
                 if (this.config.store) {
                     log('debug', `[Processor] Updating event ${event.messageId} status to RETRY in store`);
                     await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
                 }
-                
+
                 // Call error hook
                 this.config.events?.onError?.(event, err as Error);
-                
+
                 // Throw error to trigger nack and DLX routing to retry queue
                 throw err;
             }
