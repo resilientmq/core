@@ -105,6 +105,7 @@ export class ResilientEventConsumeProcessor {
                 if (this.config.deadLetterQueue) {
                     log('info', `[Processor] Sending message ${event.messageId} to DLQ`);
 
+                    const reason = (err as any).reason || 'rejected';
                     const dlqEvent: EventMessage = {
                         ...event,
                         // Set routing key if exchange is configured
@@ -117,11 +118,11 @@ export class ResilientEventConsumeProcessor {
                                 'x-error-name': (err as Error).name,
                                 'x-error-stack': (err as Error).stack || '',
                                 'x-death-count': currentAttempt,
-                                'x-death-reason': 'rejected',
+                                'x-death-reason': reason,
                                 'x-death-time': new Date().toISOString(),
                                 'x-original-queue': this.config.consumeQueue.queue,
-                                'x-first-death-reason': 'rejected',
-                                'x-first-death-queue': this.config.consumeQueue.queue
+                                'x-first-death-reason': event.properties?.headers?.['x-first-death-reason'] || reason,
+                                'x-first-death-queue': event.properties?.headers?.['x-first-death-queue'] || this.config.consumeQueue.queue
                             }
                         }
                     };
