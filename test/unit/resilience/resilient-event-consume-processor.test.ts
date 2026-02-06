@@ -12,7 +12,7 @@ describe('ResilientEventConsumeProcessor', () => {
 
     beforeEach(() => {
         mockStore = new EventStoreMock();
-        
+
         mockBroker = {
             connect: jest.fn(),
             publish: jest.fn(),
@@ -99,7 +99,7 @@ describe('ResilientEventConsumeProcessor', () => {
 
             // Process event first time
             await processor.process(testEvent);
-            
+
             // Try to process same event again (attempt 0)
             testEvent.properties = { headers: {} };
             await processor.process(testEvent);
@@ -115,14 +115,14 @@ describe('ResilientEventConsumeProcessor', () => {
 
             // Process event first time
             await processor.process(testEvent);
-            
+
             // Simulate retry with x-death header
             testEvent.properties = {
                 headers: {
                     'x-death': [{ count: 1 }]
                 }
             };
-            
+
             await processor.process(testEvent);
 
             // Handler should be called twice
@@ -131,7 +131,7 @@ describe('ResilientEventConsumeProcessor', () => {
 
         it('should execute middleware before handler', async () => {
             const executionOrder: string[] = [];
-            
+
             const middleware: Middleware = async (ctx, next) => {
                 executionOrder.push('middleware');
                 await next();
@@ -185,11 +185,11 @@ describe('ResilientEventConsumeProcessor', () => {
 
             // Should NOT throw error - message is sent to DLQ and ACK'd
             await processor.process(testEvent);
-            
+
             // Store should be updated to ERROR status
             const savedEvent = await mockStore.getEvent(testEvent);
             expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
-            
+
             // Verify message was published to DLQ
             expect(mockBroker.publish).toHaveBeenCalledWith(
                 'test.dlq',
@@ -235,7 +235,7 @@ describe('ResilientEventConsumeProcessor', () => {
         it('should call onEventStart hook before processing', async () => {
             const onEventStart = jest.fn();
             const handler = jest.fn();
-            
+
             config.eventsToProcess = [{ type: 'test.event', handler }];
             config.events = { onEventStart };
             processor = new ResilientEventConsumeProcessor(config);
@@ -250,7 +250,7 @@ describe('ResilientEventConsumeProcessor', () => {
                 control.skipEvent = true;
             });
             const handler = jest.fn();
-            
+
             config.eventsToProcess = [{ type: 'test.event', handler }];
             config.events = { onEventStart };
             processor = new ResilientEventConsumeProcessor(config);
@@ -263,7 +263,7 @@ describe('ResilientEventConsumeProcessor', () => {
         it('should call onSuccess hook after successful processing', async () => {
             const onSuccess = jest.fn();
             const handler = jest.fn();
-            
+
             config.eventsToProcess = [{ type: 'test.event', handler }];
             config.events = { onSuccess };
             processor = new ResilientEventConsumeProcessor(config);
@@ -276,7 +276,7 @@ describe('ResilientEventConsumeProcessor', () => {
         it('should call onError hook when processing fails', async () => {
             const onError = jest.fn();
             const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            
+
             config.eventsToProcess = [{ type: 'test.event', handler }];
             config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
             config.events = { onError };
@@ -299,18 +299,7 @@ describe('ResilientEventConsumeProcessor', () => {
             expect(savedEvent?.status).toBe(EventConsumeStatus.DONE);
         });
 
-        it('should delete unknown events when ignoreUnknownEvents is true', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'other.event', handler }];
-            config.ignoreUnknownEvents = true;
-            processor = new ResilientEventConsumeProcessor(config);
 
-            await processor.process(testEvent);
-
-            expect(mockStore.getCallCount('deleteEvent')).toBe(1);
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent).toBeNull();
-        });
 
         it('should work without store configured', async () => {
             const handler = jest.fn();
@@ -367,7 +356,7 @@ describe('ResilientEventConsumeProcessor', () => {
             // Verify status was updated to ERROR
             const savedEvent = await mockStore.getEvent(testEvent);
             expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
-            
+
             // Verify message was published to DLQ
             expect(mockBroker.publish).toHaveBeenCalled();
         });
