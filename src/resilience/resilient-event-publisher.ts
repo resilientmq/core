@@ -1,6 +1,6 @@
 import { AmqpQueue } from '../broker/amqp-queue';
 import { log } from '../logger/logger';
-import {EventMessage, EventPublishStatus, ResilientPublisherConfig} from "../types";
+import { EventMessage, EventPublishStatus, ResilientPublisherConfig } from "../types";
 
 /**
  * Handles publishing of events with retry and dead-letter support.
@@ -93,7 +93,7 @@ export class ResilientEventPublisher {
                 // Intentar una operación simple para verificar la conexión
                 // Usamos un evento de prueba con un ID único
                 const testEvent: EventMessage = {
-                    messageId: `__health_check_${Date.now()}__`,
+                    messageId: 'bb6c36b7-fa5a-4bf3-82b1-9cd7815f6c26',
                     type: '__health_check__',
                     payload: {}
                 };
@@ -124,19 +124,19 @@ export class ResilientEventPublisher {
         if (this.connected && !this.queue.closed) {
             return;
         }
-        
+
         // If queue was closed, we need to reconnect
         if (this.queue.closed) {
             log('debug', '[Publisher] Queue was closed, creating new connection...');
             this.connected = false;
         }
-        
+
         log('debug', '[Publisher] Connecting to RabbitMQ...');
         await this.queue.connect();
         this.connected = true;
         this.lastPublishTime = Date.now();
         log('debug', '[Publisher] Connected to RabbitMQ');
-        
+
         // Start idle timeout monitoring if configured
         this.startIdleMonitoring();
     }
@@ -147,7 +147,7 @@ export class ResilientEventPublisher {
      */
     private startIdleMonitoring(): void {
         const idleTimeout = this.config.idleTimeoutMs ?? 10000; // Default 10 seconds
-        
+
         if (idleTimeout <= 0) {
             return;
         }
@@ -159,7 +159,7 @@ export class ResilientEventPublisher {
 
         this.idleTimer = setTimeout(async () => {
             const idleTime = Date.now() - this.lastPublishTime;
-            
+
             // Only close if idle AND no pending operations
             if (idleTime >= idleTimeout && this.connected && this.pendingOperations === 0) {
                 log('info', `[Publisher] Connection idle for ${idleTime}ms with no pending operations, closing...`);
@@ -184,7 +184,7 @@ export class ResilientEventPublisher {
      */
     private resetIdleTimer(): void {
         this.lastPublishTime = Date.now();
-        
+
         // Restart idle monitoring (default 10s if not configured)
         const idleTimeout = this.config.idleTimeoutMs ?? 10000;
         if (idleTimeout > 0) {
@@ -294,13 +294,13 @@ export class ResilientEventPublisher {
         if (!this.connected) {
             return;
         }
-        
+
         // Clear idle timer
         if (this.idleTimer) {
             clearTimeout(this.idleTimer);
             this.idleTimer = undefined;
         }
-        
+
         log('debug', '[Publisher] Disconnecting from RabbitMQ...');
         await this.queue.disconnect();
         this.connected = false;
