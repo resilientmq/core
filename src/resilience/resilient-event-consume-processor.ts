@@ -24,8 +24,6 @@ export class ResilientEventConsumeProcessor {
             ? deathHeaders[0].count || 0
             : 0;
 
-        log('info', `[Processor] Start to processing message ${event.messageId} (type: ${event.type}, attempt: ${attempts + 1})`);
-
         try {
             const control = { skipEvent: false };
             this.config.events?.onEventStart?.(event, control);
@@ -42,6 +40,8 @@ export class ResilientEventConsumeProcessor {
             }
 
             const match = this.config.eventsToProcess.find(e => e.type === event.type);
+            if (match) log('info', `[Processor] Start to processing message ${event.messageId} (type: ${event.type}, attempt: ${attempts + 1})`);
+            
             if (existing && attempts === 0) {
                 log('warn', `[Processor] Duplicate event detected: ${event.messageId}, skipping`);
                 return;

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.5] - 2026-02-25
+
+### Changed
+
+- **Logging**: Moved "Start to processing message" log to only emit when the event type matches a configured processor in `eventsToProcess`
+  - Prevents unnecessary log entries for unmatched event types, reducing log noise
+  - Log now fires after the `match` check instead of before any processing logic
+
 ## [1.2.4] - 2026-02-25
 
 ### Changed
