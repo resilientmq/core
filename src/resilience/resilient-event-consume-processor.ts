@@ -24,7 +24,7 @@ export class ResilientEventConsumeProcessor {
             ? deathHeaders[0].count || 0
             : 0;
 
-        log('debug', `[Processor] Processing message ${event.messageId} (type: ${event.type}, attempt: ${attempts + 1})`);
+        log('info', `[Processor] Start to processing message ${event.messageId} (type: ${event.type}, attempt: ${attempts + 1})`);
 
         try {
             const control = { skipEvent: false };
@@ -54,7 +54,7 @@ export class ResilientEventConsumeProcessor {
             }
 
             if (!match) {
-                log('info', `[Processor] No handler for event type: ${event.type}`);
+                log('debug', `[Processor] No handler for event type: ${event.type}`);
                 if (!this.config.ignoreUnknownEvents && this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
                 return;
             }

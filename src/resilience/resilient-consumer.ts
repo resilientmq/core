@@ -88,7 +88,7 @@ export class ResilientConsumer {
                 throw new Error('Failed to initialize consumer: store connection failed');
             }
         }
-
+        log('info', `[Consumer] Connected to RabbitMQ (prefetch: ${this.config.prefetch ?? 1})`);
         await this.setupAndConsume();
     }
 
@@ -98,7 +98,6 @@ export class ResilientConsumer {
         this.queue = new AmqpQueue(this.config.connection);
         log('debug', '[Consumer] Connecting to RabbitMQ...');
         await this.queue.connect(this.config.prefetch ?? 1);
-        log('info', `[Consumer] Connected to RabbitMQ (prefetch: ${this.config.prefetch ?? 1})`);
 
         const { queue: consumeQueue, options, exchanges } = this.config.consumeQueue;
         log('debug', `[Consumer] Setting up consume queue: ${consumeQueue}`);
@@ -231,7 +230,7 @@ export class ResilientConsumer {
         log('debug', `[Consumer] Starting to consume messages from queue: ${consumeQueue}`);
         await this.queue.consume(consumeQueue, async (event: EventMessage) => {
             this.processingCount++;
-            log('info', `[Consumer] Received message ${event.messageId} (type: ${event.type})`);
+            log('debug', `[Consumer] Received message ${event.messageId} (type: ${event.type})`);
 
             try {
                 // Verificar store antes de procesar si está configurado
@@ -261,7 +260,7 @@ export class ResilientConsumer {
         if (maxUptime > 0) {
             log('debug', `[Consumer] Auto-reconnection scheduled after ${maxUptime}ms`);
             this.uptimeTimer = setTimeout(async () => {
-                log("warn", `[Consumer] Max uptime reached, reconnecting...`);
+                log("debug", `[Consumer] Max uptime reached, reconnecting...`);
                 await this.reconnect();
             }, maxUptime);
         } else {
@@ -363,7 +362,7 @@ export class ResilientConsumer {
             return;
         }
 
-        log('warn', '[Consumer] Reconnecting...');
+        log('debug', '[Consumer] Reconnecting...');
         this.reconnecting = true;
 
         await this.waitForProcessing();
@@ -388,11 +387,11 @@ export class ResilientConsumer {
         }
 
         const delay = this.config.reconnectDelayMs ?? 10000;
-        log('info', `[Consumer] Restarting in ${delay}ms...`);
+        log('debug', `[Consumer] Restarting in ${delay}ms...`);
 
         setTimeout(() => {
             this.reconnecting = false;
-            this.start().catch((error) => {
+            this.setupAndConsume().catch((error) => {
                 log('error', '[Consumer] Failed to restart', error);
             });
         }, delay);
