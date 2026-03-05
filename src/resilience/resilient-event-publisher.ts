@@ -162,7 +162,7 @@ export class ResilientEventPublisher {
 
             // Only close if idle AND no pending operations
             if (idleTime >= idleTimeout && this.connected && this.pendingOperations === 0) {
-                log('info', `[Publisher] Connection idle for ${idleTime}ms with no pending operations, closing...`);
+                log('debug', `[Publisher] Connection idle for ${idleTime}ms with no pending operations, closing...`);
                 try {
                     await this.disconnect();
                 } catch (error) {
@@ -267,7 +267,7 @@ export class ResilientEventPublisher {
                 }
                 log('info', `[Publisher] Message ${event.messageId} published successfully`);
             } else {
-                log('info', `[Publisher] Message ${event.messageId} stored for later delivery`);
+                log('debug', `[Publisher] Message ${event.messageId} stored for later delivery`);
             }
         } catch (error) {
             log('error', `[Publisher] Failed to publish message ${event.messageId}`, error);
@@ -312,7 +312,7 @@ export class ResilientEventPublisher {
      * @private
      */
     private startPendingEventsCheck(): void {
-        log('info', `[Publisher] Pending events check enabled (interval: ${this.config.pendingEventsCheckIntervalMs}ms)`);
+        log('debug', `[Publisher] Pending events check enabled (interval: ${this.config.pendingEventsCheckIntervalMs}ms)`);
 
         this.pendingEventsInterval = setInterval(() => {
             this.processPendingEvents().catch((error) => {
@@ -329,7 +329,7 @@ export class ResilientEventPublisher {
         if (this.pendingEventsInterval) {
             clearInterval(this.pendingEventsInterval);
             this.pendingEventsInterval = undefined;
-            log('info', '[Publisher] Stopped pending events check');
+            log('debug', '[Publisher] Stopped pending events check');
         }
     }
 
@@ -420,7 +420,7 @@ export class ResilientEventPublisher {
                 }
             }
 
-            log('info', `[Publisher] Processed ${successCount} pending event(s) successfully${errorCount > 0 ? `, ${errorCount} failed` : ''}`);
+            log('info', `[Publisher] Events with messageID: ${pendingEvents.map(e => e.messageId).join(', ')} processed. Success: ${successCount}, Errors: ${errorCount}`);
         } catch (error) {
             log('error', '[Publisher] Error during pending events processing', error);
             throw error;

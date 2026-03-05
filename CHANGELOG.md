@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.6] - 2026-03-05
+
+### Changed
+
+- **Logging (Publisher)**: Adjusted log levels and improved log messages in `ResilientEventPublisher` for reduced noise and better observability
+  - Demoted idle connection close message from `info` to `debug` level
+  - Demoted "stored for later delivery" message from `info` to `debug` level
+  - Demoted pending events check start/stop messages from `info` to `debug` level
+  - Improved pending events processing log to include the `messageId` of each processed event and a success/error summary (e.g., `Events with messageID: ... processed. Success: X, Errors: Y`)
+
 ## [1.2.5] - 2026-02-25
 
 ### Changed
