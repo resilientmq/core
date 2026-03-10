@@ -9,9 +9,9 @@ Unified pipeline that handles testing, building, and publishing to npm.
 ### Jobs and Dependencies
 
 ```
-unit-tests (Node 18, 20, 22, 24)
+unit-tests (Node 18, 20, 22, 24, 25)
     ↓
-integration-tests (Node 18, 20, 22, 24)
+integration-tests (Node 18, 20, 22, 24, 25)
     ↓
     ├─→ stress-tests
     └─→ benchmarks
@@ -40,13 +40,13 @@ The workflow only runs when changes are made to:
 ### Jobs
 
 #### 1. Unit Tests
-- Runs on Node.js 18, 20, 22, and 24
+- Runs on Node.js 18, 20, 22, 24, and 25
 - Executes unit tests with coverage
 - Verifies coverage is >= 70%
 - Uploads coverage reports and results
 
 #### 2. Integration Tests
-- Runs on Node.js 18, 20, 22, and 24
+- Runs on Node.js 18, 20, 22, 24, and 25
 - Starts RabbitMQ as a service
 - Waits up to 60 seconds for RabbitMQ to be ready
 - Executes integration tests

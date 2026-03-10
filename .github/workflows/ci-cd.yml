@@ -35,7 +35,7 @@ jobs:
     
     strategy:
       matrix:
-        node-version: [18, 20, 22, 24]
+        node-version: [18, 20, 22, 24, 25]
       fail-fast: false
     
     steps:
@@ -112,7 +112,7 @@ jobs:
     
     strategy:
       matrix:
-        node-version: [18, 20, 22, 24]
+        node-version: [18, 20, 22, 24, 25]
       fail-fast: false
     
     services:
@@ -650,7 +650,7 @@ jobs:
           echo "### 🧪 Unit Tests" >> $GITHUB_STEP_SUMMARY
           if [ "${{ needs.unit-tests.result }}" == "success" ]; then
             echo "✅ **Status:** Passed" >> $GITHUB_STEP_SUMMARY
-            echo "- Tested on Node.js: 18, 20, 22, 24" >> $GITHUB_STEP_SUMMARY
+            echo "- Tested on Node.js: 18, 20, 22, 24, 25" >> $GITHUB_STEP_SUMMARY
             echo "- Coverage threshold: ≥70%" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **Status:** Failed" >> $GITHUB_STEP_SUMMARY
@@ -662,7 +662,7 @@ jobs:
           echo "### 🔗 Integration Tests" >> $GITHUB_STEP_SUMMARY
           if [ "${{ needs.integration-tests.result }}" == "success" ]; then
             echo "✅ **Status:** Passed" >> $GITHUB_STEP_SUMMARY
-            echo "- Tested on Node.js: 18, 20, 22, 24" >> $GITHUB_STEP_SUMMARY
+            echo "- Tested on Node.js: 18, 20, 22, 24, 25" >> $GITHUB_STEP_SUMMARY
             echo "- RabbitMQ: 3.12-management-alpine" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **Status:** Failed" >> $GITHUB_STEP_SUMMARY
