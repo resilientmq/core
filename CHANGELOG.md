@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.12] - 2026-03-10
+
+### Fixed
+
+- **Publisher (processPendingEvents)**: Fixed critical bug where pending events were published multiple times (e.g., 10 duplicates)
+  - **Root cause**: `processPendingEvents()` had no concurrency guard. When the periodic `setInterval` fired while a previous execution was still running, both calls fetched the **same PENDING events** from the store and published them simultaneously, causing each event to be sent multiple times
+  - Added a `processingPending` mutex flag that prevents concurrent executions. If the interval fires while processing is already in progress, the new invocation is skipped with a debug log
+  - Refactored `processPendingEvents()` into a public guard method + private `_processPendingEventsInternal()` to ensure the flag is always released in a `finally` block, even on errors
+
 ## [1.2.11] - 2026-03-10
 
 ### Fixed

@@ -15,6 +15,7 @@ export class ResilientEventPublisher {
     private lastPublishTime: number = 0;
     private pendingOperations: number = 0;
     private readonly maxConcurrentPublishes: number = 100; // Limit concurrent operations
+    private processingPending: boolean = false;
 
     constructor(private readonly config: ResilientPublisherConfig) {
         // Validar configuración
@@ -346,7 +347,29 @@ export class ResilientEventPublisher {
      * Events are retrieved from oldest to newest based on their timestamp.
      */
     async processPendingEvents(): Promise<void> {
+        // Prevent concurrent executions — if the periodic interval fires while a previous
+        // processPendingEvents is still running, both would fetch the same PENDING events
+        // and publish them, causing duplicates.
+        if (this.processingPending) {
+            log('debug', '[Publisher] processPendingEvents already in progress, skipping this cycle');
+            return;
+        }
+
+        this.processingPending = true;
         log('debug', '[Publisher] Checking for pending events...');
+
+        try {
+            await this._processPendingEventsInternal();
+        } finally {
+            this.processingPending = false;
+        }
+    }
+
+    /**
+     * Internal implementation of pending events processing.
+     * @private
+     */
+    private async _processPendingEventsInternal(): Promise<void> {
 
         if (!this.config.store) {
             log('warn', '[Publisher] Cannot process pending events: no store configured');
