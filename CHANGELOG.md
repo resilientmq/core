@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.9] - 2026-03-10
+
+### Fixed
+
+- **Publisher (processPendingEvents)**: Fixed `TypeError: pendingEvents.sort is not a function` when `EventStore.getPendingEvents()` returns non-array iterables (e.g., Mongoose cursors, Prisma results)
+  - Added defensive `Array.isArray` check with `Array.from()` fallback to coerce the result into a native array before processing
+
 ## [1.2.8] - 2026-03-10
 
 ### Changed

@@ -376,9 +376,10 @@ export class ResilientEventPublisher {
                 batchNumber++;
                 log('debug', `[Publisher] Fetching pending events batch #${batchNumber} (limit: ${BATCH_SIZE})...`);
 
-                const pendingEvents = await this.config.store.getPendingEvents!(EventPublishStatus.PENDING, BATCH_SIZE);
+                const rawResult = await this.config.store.getPendingEvents!(EventPublishStatus.PENDING, BATCH_SIZE);
+                const pendingEvents: EventMessage[] = Array.isArray(rawResult) ? rawResult : Array.from(rawResult as any);
 
-                if (pendingEvents.length === 0) {
+                if (!pendingEvents || pendingEvents.length === 0) {
                     if (batchNumber === 1) {
                         log('debug', '[Publisher] No pending events found');
                     }
