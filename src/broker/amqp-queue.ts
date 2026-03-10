@@ -268,4 +268,5 @@ export class AmqpQueue implements MessageQueue {
     async close(): Promise<void> {
         await this.disconnect();
     }
+
 }
