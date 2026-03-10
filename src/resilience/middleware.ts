@@ -1,4 +1,4 @@
-import {EventMessage, Middleware} from "../types";
+import { EventMessage, Middleware } from "../types";
 
 export function applyMiddleware(
     middlewares: Middleware[],
@@ -12,3 +12,4 @@ export function applyMiddleware(
     };
     return compose(middlewares, context, handler);
 }
+
