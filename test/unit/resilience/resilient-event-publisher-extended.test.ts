@@ -85,7 +85,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
             publisher = new ResilientEventPublisher(config);
 
             const getEventSpy = jest.spyOn(mockStore, 'getEvent');
-            
+
             await publisher.publish(testEvent);
 
             expect(getEventSpy).toHaveBeenCalled();
@@ -168,6 +168,115 @@ describe('ResilientEventPublisher - Extended Tests', () => {
 
             const savedEvent = await mockStore.getEvent(testEvent);
             expect(savedEvent?.status).toBe(EventPublishStatus.ERROR);
+        });
+
+        it('should handle processPendingEvents when one event fails to publish', async () => {
+            let publishCount = 0;
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockImplementation(async () => {
+                    publishCount++;
+                    if (publishCount === 2) {
+                        throw new Error('Publish failed for event 2');
+                    }
+                }),
+                closed: false
+            }));
+
+            config.instantPublish = false;
+            publisher = new ResilientEventPublisher(config);
+
+            // Store multiple pending events
+            const event1 = { ...testEvent, messageId: 'msg-001' };
+            const event2 = { ...testEvent, messageId: 'msg-002' };
+            const event3 = { ...testEvent, messageId: 'msg-003' };
+            await publisher.publish(event1, { storeOnly: true });
+            await publisher.publish(event2, { storeOnly: true });
+            await publisher.publish(event3, { storeOnly: true });
+
+            // Process pending events — event 2 will fail
+            await publisher.processPendingEvents();
+
+            // Event 1 and 3 should be published, event 2 should be ERROR
+            const saved1 = await mockStore.getEvent(event1);
+            const saved2 = await mockStore.getEvent(event2);
+            const saved3 = await mockStore.getEvent(event3);
+
+            expect(saved1?.status).toBe(EventPublishStatus.PUBLISHED);
+            expect(saved2?.status).toBe(EventPublishStatus.ERROR);
+            expect(saved3?.status).toBe(EventPublishStatus.PUBLISHED);
+        });
+
+        it('should throw processPendingEvents when store lacks getPendingEvents', async () => {
+            config.store = {
+                saveEvent: jest.fn(),
+                getEvent: jest.fn(),
+                updateEventStatus: jest.fn(),
+            } as any;
+
+            publisher = new ResilientEventPublisher(config);
+
+            await expect(publisher.processPendingEvents()).rejects.toThrow(
+                'Store must implement getPendingEvents() method'
+            );
+        });
+    });
+
+    describe('connection recovery', () => {
+        it('should reconnect when queue was closed', async () => {
+            const mockConnect = jest.fn().mockResolvedValue(undefined);
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+
+            let queueInstance: any;
+            AmqpQueue.mockImplementation(() => {
+                queueInstance = {
+                    connect: mockConnect,
+                    disconnect: jest.fn().mockResolvedValue(undefined),
+                    publish: jest.fn().mockResolvedValue(undefined),
+                    closed: false
+                };
+                return queueInstance;
+            });
+
+            publisher = new ResilientEventPublisher(config);
+
+            // First publish establishes connection
+            await publisher.publish(testEvent);
+            expect(mockConnect).toHaveBeenCalledTimes(1);
+
+            // Simulate connection closed
+            queueInstance.closed = true;
+
+            // Second publish should trigger reconnection
+            const event2 = { ...testEvent, messageId: 'msg-002' };
+            await publisher.publish(event2);
+
+            // Should have connected again
+            expect(mockConnect).toHaveBeenCalledTimes(2);
+        });
+
+        it('should handle concurrent publishing without deadlock', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockImplementation(() => new Promise(resolve => setTimeout(resolve, 10))),
+                closed: false
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+
+            const events = Array.from({ length: 10 }, (_, i) => ({
+                ...testEvent,
+                messageId: `msg-${i}`
+            }));
+
+            // All should eventually complete
+            await Promise.all(events.map(event => publisher.publish(event)));
+
+            expect(mockStore.getCallCount('saveEvent')).toBe(10);
         });
     });
 });

@@ -212,6 +212,12 @@ export class ResilientEventPublisher {
         try {
             const store = this.config.store;
 
+            // Single decision: should we publish to RabbitMQ now?
+            // - storeOnly: user explicitly wants store-only, no publish
+            // - !instantPublish && store: deferred mode, events are sent later via processPendingEvents()
+            // - !store: no persistence, must publish immediately
+            const shouldPublishNow = !options?.storeOnly && (this.instantPublish || !store);
+
             // Si hay store configurado, verificar y guardar el evento
             if (store) {
                 log('debug', `[Publisher] Checking store connection...`);
@@ -231,20 +237,13 @@ export class ResilientEventPublisher {
                 event.status = EventPublishStatus.PENDING;
                 log('debug', `[Publisher] Saving event ${event.messageId} to store...`);
                 await store.saveEvent(event);
-
-                // Si storeOnly está habilitado, solo guardamos el evento sin enviarlo
-                if (options?.storeOnly) {
-                    log('info', `[Publisher] Message ${event.messageId} stored for later delivery`);
-                    return;
-                }
             } else {
                 log('debug', `[Publisher] No store configured, proceeding without persistence`);
                 // If no store, still mark status locally for callers if desired
                 event.status = EventPublishStatus.PENDING;
             }
 
-            // Publicar solo si instantPublish está habilitado o no hay store
-            if (this.instantPublish || !store) {
+            if (shouldPublishNow) {
                 log('debug', `[Publisher] Publishing message ${event.messageId} to RabbitMQ...`);
 
                 await this.connect();

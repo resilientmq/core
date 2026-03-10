@@ -25,7 +25,7 @@ describe('ResilientConsumer - Extended Tests', () => {
     beforeEach(() => {
         mockStore = new EventStoreMock();
         mockLib = new AMQPLibMock();
-        
+
         const amqplib = require('amqplib');
         amqplib.connect.mockImplementation((url: any) => mockLib.connect(url));
 
@@ -92,7 +92,7 @@ describe('ResilientConsumer - Extended Tests', () => {
 
             const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
             let consumeCallback: any;
-            
+
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 consume: jest.fn().mockImplementation(async (_queue, callback) => {
@@ -134,7 +134,7 @@ describe('ResilientConsumer - Extended Tests', () => {
 
             const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
             let consumeCallback: any;
-            
+
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 consume: jest.fn().mockImplementation(async (_queue, callback) => {
@@ -144,7 +144,8 @@ describe('ResilientConsumer - Extended Tests', () => {
                 cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
                 channel: mockChannel,
                 connection: mockConnection,
-                closed: false
+                closed: false,
+                publish: jest.fn().mockResolvedValue(undefined)
             }));
 
             consumer = new ResilientConsumer(config);
@@ -158,7 +159,9 @@ describe('ResilientConsumer - Extended Tests', () => {
             };
 
             if (consumeCallback) {
-                await expect(consumeCallback(testEvent)).rejects.toThrow('Processing failed');
+                // Processor now handles errors internally (publishes to retry queue and ACKs)
+                // so this should resolve without throwing
+                await expect(consumeCallback(testEvent)).resolves.not.toThrow();
             }
         });
     });
@@ -395,7 +398,7 @@ describe('ResilientConsumer - Extended Tests', () => {
             consumer = new ResilientConsumer(config);
             await consumer.start();
             await consumer.stop();
-            
+
             // Stop again
             await expect(consumer.stop()).resolves.not.toThrow();
         });
@@ -414,7 +417,7 @@ describe('ResilientConsumer - Extended Tests', () => {
 
             consumer = new ResilientConsumer(config);
             await consumer.start();
-            
+
             // Should not throw even if disconnect fails
             await expect(consumer.stop()).resolves.not.toThrow();
         });

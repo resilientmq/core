@@ -73,7 +73,7 @@ describe('DLQHandler', () => {
 
             expect(mockBroker.publish).toHaveBeenCalled();
             const publishedEvent = mockBroker.publish.mock.calls[0][1];
-            
+
             expect(publishedEvent.properties?.headers).toMatchObject({
                 'x-error-message': 'Processing failed',
                 'x-error-name': 'ProcessingError',
@@ -249,10 +249,41 @@ describe('DLQHandler', () => {
 
             const publishedEvent = mockBroker.publish.mock.calls[0][1];
             const deathTime = publishedEvent.properties?.headers?.['x-death-time'];
-            
+
             expect(deathTime).toBeDefined();
             expect(deathTime >= beforeTime).toBe(true);
             expect(deathTime <= afterTime).toBe(true);
+        });
+
+        it('should handle x-original-exchange and missing error stack', async () => {
+            const dlqConfig = {
+                queue: 'test.dlq',
+                exchange: {
+                    name: 'dlq.exchange',
+                    type: 'direct' as const,
+                    options: { durable: true }
+                }
+            };
+
+            testEvent.properties = {
+                ...testEvent.properties,
+                headers: {
+                    'x-original-exchange': 'my-custom-exch',
+                    'x-original-routing-key': 'my-custom-key'
+                }
+            };
+
+            const customError: any = new Error('No stack error');
+            delete customError.stack; // remove stack to hit the fallback
+
+            await handleDLQ(dlqConfig, mockBroker, testEvent, customError);
+
+            const publishedEvent = mockBroker.publish.mock.calls[0][1];
+            expect(publishedEvent.properties?.headers?.['x-first-death-exchange']).toBe('my-custom-exch');
+            expect(publishedEvent.properties?.headers?.['x-first-death-routing-key']).toBe('my-custom-key');
+            expect(publishedEvent.properties?.headers?.['x-original-exchange']).toBe('my-custom-exch');
+            expect(publishedEvent.properties?.headers?.['x-original-routing-key']).toBe('my-custom-key');
+            expect(publishedEvent.properties?.headers?.['x-error-stack']).toBe('');
         });
     });
 });

@@ -678,10 +678,11 @@ jobs:
             echo "- High volume testing completed" >> $GITHUB_STEP_SUMMARY
             
             # Try to read stress test metrics
-            if [ -d "stress-test-results" ]; then
+            # Try to read stress test metrics
+            if ls stress-test-results/stress-*.json 1> /dev/null 2>&1; then
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "**Metrics:**" >> $GITHUB_STEP_SUMMARY
-              for file in stress-test-results/*.json; do
+              for file in stress-test-results/stress-*.json; do
                 if [ -f "$file" ]; then
                   TEST_NAME=$(basename "$file" .json | sed 's/stress-//' | sed 's/-/ /g')
                   THROUGHPUT=$(node -p "const data = require('./$file'); data.throughput || 'N/A'" 2>/dev/null || echo "N/A")
@@ -705,10 +706,11 @@ jobs:
             echo "- Avg Latency: ≤100 ms" >> $GITHUB_STEP_SUMMARY
             
             # Try to read benchmark metrics
-            if [ -d "benchmark-results" ]; then
+            # Try to read benchmark metrics
+            if ls benchmark-results/benchmark-*.json 1> /dev/null 2>&1; then
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "**Results:**" >> $GITHUB_STEP_SUMMARY
-              for file in benchmark-results/*.json; do
+              for file in benchmark-results/benchmark-*.json; do
                 if [ -f "$file" ]; then
                   BENCH_NAME=$(basename "$file" .json | sed 's/benchmark-//' | sed 's/-/ /g')
                   THROUGHPUT=$(node -p "const data = require('./$file'); data.throughput || data.publishThroughput || 'N/A'" 2>/dev/null || echo "N/A")
