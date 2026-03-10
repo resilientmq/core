@@ -41,12 +41,15 @@ export interface EventStore {
     deleteEvent(event: EventMessage): Promise<void>;
 
     /**
-     * Retrieves all pending events with the specified status.
+     * Retrieves pending events with the specified status.
      * This method is optional, but REQUIRED when using ResilientEventPublisher
      * with instantPublish set to false.
      *
      * @param status - The status to filter events by (e.g., PENDING).
+     * @param limit - Optional maximum number of events to retrieve per batch.
+     *               When provided, only up to `limit` events are returned,
+     *               enabling paginated processing to avoid memory issues.
      * @returns Array of pending events. Order is handled by the publisher.
      */
-    getPendingEvents?(status: EventPublishStatus): Promise<EventMessage[]>;
+    getPendingEvents?(status: EventPublishStatus, limit?: number): Promise<EventMessage[]>;
 }

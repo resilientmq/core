@@ -364,62 +364,77 @@ export class ResilientEventPublisher {
                 await this.checkStoreConnection();
             }
 
-            log('debug', '[Publisher] Fetching pending events from store...');
-            // Obtener eventos pendientes
-            const pendingEvents = await this.config.store.getPendingEvents(EventPublishStatus.PENDING);
-
-            if (pendingEvents.length === 0) {
-                log('debug', '[Publisher] No pending events found');
-                return;
-            }
-
-            log('info', `[Publisher] Processing ${pendingEvents.length} pending event(s)`);
-
-            // Ordenar del más antiguo al más nuevo basado en timestamp
-            log('debug', '[Publisher] Sorting events by timestamp (oldest first)...');
-            const sortedEvents = pendingEvents.sort((a, b) => {
-                const timeA = a.properties?.timestamp || 0;
-                const timeB = b.properties?.timestamp || 0;
-                return timeA - timeB;
-            });
-
             await this.connect();
 
-            let successCount = 0;
-            let errorCount = 0;
+            const BATCH_SIZE = 10;
+            let totalSuccess = 0;
+            let totalErrors = 0;
+            let batchNumber = 0;
 
-            // Procesar cada evento en orden
-            for (let i = 0; i < sortedEvents.length; i++) {
-                const event = sortedEvents[i];
-                log('debug', `[Publisher] Processing pending event ${i + 1}/${sortedEvents.length}: ${event.messageId}`);
+            // Procesar en lotes de BATCH_SIZE hasta que no queden más eventos pendientes
+            while (true) {
+                batchNumber++;
+                log('debug', `[Publisher] Fetching pending events batch #${batchNumber} (limit: ${BATCH_SIZE})...`);
 
-                try {
-                    const destination = this.config.queue ?? this.config.exchange?.name!;
+                const pendingEvents = await this.config.store.getPendingEvents!(EventPublishStatus.PENDING, BATCH_SIZE);
 
-                    await this.queue.publish(
-                        destination,
-                        event,
-                        {
-                            exchange: this.config.exchange
-                        }
-                    );
+                if (pendingEvents.length === 0) {
+                    if (batchNumber === 1) {
+                        log('debug', '[Publisher] No pending events found');
+                    }
+                    break;
+                }
 
-                    log('debug', `[Publisher] Updating status to PUBLISHED for message ${event.messageId}...`);
-                    await this.config.store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
-                    successCount++;
-                } catch (error) {
-                    errorCount++;
-                    log('error', `[Publisher] Failed to publish pending message ${event.messageId}`, error);
+                log('debug', `[Publisher] Processing batch #${batchNumber} with ${pendingEvents.length} event(s)`);
+
+                // Ordenar del más antiguo al más nuevo basado en timestamp
+                const sortedEvents = pendingEvents.sort((a, b) => {
+                    const timeA = a.properties?.timestamp || 0;
+                    const timeB = b.properties?.timestamp || 0;
+                    return timeA - timeB;
+                });
+
+                for (let i = 0; i < sortedEvents.length; i++) {
+                    const event = sortedEvents[i];
+                    log('debug', `[Publisher] Processing pending event ${event.messageId}`);
 
                     try {
-                        await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
-                    } catch (updateError) {
-                        log('error', `[Publisher] Failed to update ERROR status`, updateError);
+                        const destination = this.config.queue ?? this.config.exchange?.name!;
+
+                        await this.queue.publish(
+                            destination,
+                            event,
+                            {
+                                exchange: this.config.exchange
+                            }
+                        );
+
+                        log('debug', `[Publisher] Updating status to PUBLISHED for message ${event.messageId}...`);
+                        await this.config.store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
+                        totalSuccess++;
+                    } catch (error) {
+                        totalErrors++;
+                        log('error', `[Publisher] Failed to publish pending message ${event.messageId}`, error);
+
+                        try {
+                            await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
+                        } catch (updateError) {
+                            log('error', `[Publisher] Failed to update ERROR status`, updateError);
+                        }
                     }
+                }
+
+                log('debug', `[Publisher] Batch #${batchNumber} completed. Success: ${totalSuccess}, Errors: ${totalErrors}`);
+
+                // Si el lote devolvió menos eventos que BATCH_SIZE, no hay más pendientes
+                if (pendingEvents.length < BATCH_SIZE) {
+                    break;
                 }
             }
 
-            log('info', `[Publisher] Events with messageID: ${pendingEvents.map(e => e.messageId).join(', ')} processed. Success: ${successCount}, Errors: ${errorCount}`);
+            if (totalSuccess > 0 || totalErrors > 0) {
+                log('info', `[Publisher] Pending events processing finished. Total batches: ${batchNumber}, Success: ${totalSuccess}, Errors: ${totalErrors}`);
+            }
         } catch (error) {
             log('error', '[Publisher] Error during pending events processing', error);
             throw error;

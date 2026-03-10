@@ -149,6 +149,12 @@ const store: EventStore = {
 
   async deleteEvent(id) {
     await db.delete(id);
+  },
+
+  // Required for processPendingEvents() — supports optional `limit` for batched retrieval
+  async getPendingEvents(status, limit?) {
+    const query = db.find({ customStatus: status }).sort({ createdAt: 1 });
+    return limit ? query.limit(limit) : query;
   }
 };
 ```
@@ -282,10 +288,44 @@ publisher.stopPendingEventsCheck();
 **Key Features:**
 - **`storeOnly: true`**: Stores the event without sending it immediately (useful for offline scenarios)
 - **`pendingEventsCheckIntervalMs`**: Configurable interval to automatically check and send pending events
-- **`processPendingEvents()`**: Manually trigger processing of all pending events
+- **`processPendingEvents()`**: Manually trigger processing of pending events
 - **`stopPendingEventsCheck()`**: Stop the periodic check for graceful shutdown
 - Events are automatically sorted and sent in chronological order (oldest first)
 - Only connects to RabbitMQ when there are actually pending events to process
+
+### ⚡ Batched Pending Events Processing (v1.2.8+)
+
+`processPendingEvents()` processes events in **batches of 10** to avoid memory issues when there are thousands of pending events. The method:
+
+1. Calls `store.getPendingEvents(PENDING, 10)` to fetch up to 10 events
+2. Sorts and publishes each event in the batch
+3. Repeats until `getPendingEvents` returns an empty array or fewer than 10 events
+
+This prevents **heap allocation failures** (`JavaScript heap out of memory`) that can occur when loading all pending events into memory at once.
+
+> **⚠️ Important:** Your `EventStore.getPendingEvents()` implementation should respect the optional `limit` parameter and apply it at the database query level (e.g., `LIMIT 10` in SQL or `.limit(10)` in MongoDB). If the `limit` is not applied at the query level, all events will still be loaded into memory, defeating the purpose of batching.
+
+#### Example: Implementing `getPendingEvents` with limit
+
+```ts
+// MongoDB / Mongoose example
+async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<EventMessage[]> {
+  const query = EventModel.find({ status }).sort({ createdAt: 1 });
+  if (limit) {
+    query.limit(limit);
+  }
+  return query.exec();
+}
+
+// Prisma example
+async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<EventMessage[]> {
+  return prisma.event.findMany({
+    where: { status },
+    orderBy: { createdAt: 'asc' },
+    ...(limit ? { take: limit } : {})
+  });
+}
+```
 
 ---
 

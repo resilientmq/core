@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.8] - 2026-03-10
+
+### Changed
+
+- **Publisher (processPendingEvents)**: Refactored pending events processing to use **batched pagination** (10 events per batch) instead of loading all pending events into memory at once
+  - Prevents `heap allocation failed` / `JavaScript heap out of memory` errors when there are thousands of pending events in the store
+  - Events are now fetched in successive batches of 10, processed, and the loop continues until no more pending events remain
+  - Added optional `limit` parameter to `EventStore.getPendingEvents()` interface to support server-side pagination
+  - Improved logging with batch numbers and cumulative success/error counts
+
+### Fixed
+
+- **Pipeline (Jest Hanging)**: Added `globalTeardown` script and `--forceExit` flag to all Jest test configurations to prevent the CI/CD pipeline from hanging indefinitely after `Ran all test suites`
+- **Node 18 Compatibility**: Added `File` and `Blob` polyfills in test setup for `undici`/`testcontainers` compatibility with Node.js 18
+
 ## [1.2.7] - 2026-03-10
 
 ### Added

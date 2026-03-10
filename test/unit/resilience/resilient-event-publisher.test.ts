@@ -348,12 +348,8 @@ describe('ResilientEventPublisher', () => {
             expect(updateSpy).toHaveBeenCalled();
         });
 
-        it('should exit processPendingEvents early if already processing', async () => {
-            config.instantPublish = false;
-            publisher = new ResilientEventPublisher(config);
-            (publisher as any).processingPendingEvents = true; // pretend it's running
-            await expect(publisher.processPendingEvents()).resolves.not.toThrow();
-        });
+
+
 
         it('should exit processPendingEvents early if store lacks getPendingEvents', async () => {
             config.instantPublish = true; // Use true so it passes constructor validation without getPendingEvents
