@@ -65,6 +65,7 @@ export class AmqpQueue implements MessageQueue {
             
             // Setup channel event handlers immediately after channel creation
             this._channel.on('close', () => {
+                this.closed = true;
                 log('debug', '[AMQP] Channel closed');
             });
 
@@ -73,6 +74,8 @@ export class AmqpQueue implements MessageQueue {
             });
 
             await this._channel.prefetch(this._prefetchCount);
+            this.closed = false;
+            log('debug', '[AMQP] Connection established successfully');
         } catch (error) {
             this.closed = true;
             log('error', '[AMQP] Failed to connect', error);

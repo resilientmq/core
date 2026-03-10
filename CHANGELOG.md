@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.10] - 2026-03-10
+
+### Fixed
+
+- **Publisher (processPendingEvents)**: Fixed `IllegalOperationError: Channel closed` cascading failures during batch processing of pending events
+  - When the AMQP channel closes mid-batch, subsequent messages no longer fail one by one with the same error
+  - Added proactive channel health check (`queue.closed`) before each publish attempt within the batch loop
+  - If the channel is detected as closed before publishing, the publisher automatically reconnects before continuing
+  - If a publish fails due to a closed channel, the publisher attempts to reconnect for remaining messages
+  - If reconnection fails, the batch is **aborted gracefully** — remaining messages stay as PENDING in the store for the next processing cycle instead of being marked as ERROR
+
+- **AmqpQueue (connect)**: Fixed reconnection not working after a channel/connection closure
+  - The `closed` flag is now reset to `false` after a successful `connect()` call, allowing proper reconnection
+  - Previously, once `closed` was set to `true`, calling `connect()` again would succeed but the flag remained `true`, causing the publisher to think the channel was still closed
+
+- **AmqpQueue (channel close handler)**: Channel closure now properly marks the queue as closed
+  - Added `this.closed = true` to the `channel.on('close')` handler
+  - Previously only the connection `close` event set the flag, so a channel-only closure (e.g., server-initiated channel close) was not detected by the publisher
+
 ## [1.2.9] - 2026-03-10
 
 ### Fixed

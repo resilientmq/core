@@ -397,9 +397,17 @@ export class ResilientEventPublisher {
 
                 for (let i = 0; i < sortedEvents.length; i++) {
                     const event = sortedEvents[i];
-                    log('debug', `[Publisher] Processing pending event ${event.messageId}`);
+                    log('debug', `[Publisher] Processing pending event ${i + 1}/${sortedEvents.length}: ${event.messageId}`);
 
                     try {
+                        // Check if the channel/connection is still alive before each publish
+                        if (this.queue.closed) {
+                            log('warn', `[Publisher] Channel closed detected before publishing message ${event.messageId}, reconnecting...`);
+                            this.connected = false;
+                            await this.connect();
+                            log('info', `[Publisher] Reconnected successfully, resuming batch processing`);
+                        }
+
                         const destination = this.config.queue ?? this.config.exchange?.name!;
 
                         await this.queue.publish(
@@ -417,10 +425,25 @@ export class ResilientEventPublisher {
                         totalErrors++;
                         log('error', `[Publisher] Failed to publish pending message ${event.messageId}`, error);
 
+                        // If the channel is closed, try to reconnect for the remaining messages
+                        if (this.queue.closed) {
+                            log('warn', `[Publisher] Channel closed during batch processing, attempting reconnect for remaining messages...`);
+                            this.connected = false;
+                            try {
+                                await this.connect();
+                                log('info', `[Publisher] Reconnected after failure, continuing batch`);
+                            } catch (reconnectError) {
+                                log('error', `[Publisher] Reconnection failed, aborting batch processing. Remaining ${sortedEvents.length - i - 1} messages will be retried later.`, reconnectError);
+                                // Mark remaining events as still pending (they haven't been touched)
+                                // and break out of the loop
+                                break;
+                            }
+                        }
+
                         try {
                             await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
                         } catch (updateError) {
-                            log('error', `[Publisher] Failed to update ERROR status`, updateError);
+                            log('error', `[Publisher] Failed to update ERROR status for ${event.messageId}`, updateError);
                         }
                     }
                 }
