@@ -342,6 +342,7 @@ export class ResilientEventPublisher {
 
     /**
      * Processes all pending events from the store and sends them in chronological order.
+     * Each batch gets its own fresh RabbitMQ connection to avoid stale channel issues.
      * Events are retrieved from oldest to newest based on their timestamp.
      */
     async processPendingEvents(): Promise<void> {
@@ -364,8 +365,6 @@ export class ResilientEventPublisher {
                 await this.checkStoreConnection();
             }
 
-            await this.connect();
-
             const BATCH_SIZE = 10;
             let totalSuccess = 0;
             let totalErrors = 0;
@@ -386,7 +385,7 @@ export class ResilientEventPublisher {
                     break;
                 }
 
-                log('debug', `[Publisher] Processing batch #${batchNumber} with ${pendingEvents.length} event(s)`);
+                log('info', `[Publisher] Processing batch #${batchNumber} with ${pendingEvents.length} event(s)`);
 
                 // Ordenar del más antiguo al más nuevo basado en timestamp
                 const sortedEvents = pendingEvents.sort((a, b) => {
@@ -395,19 +394,21 @@ export class ResilientEventPublisher {
                     return timeA - timeB;
                 });
 
+                // Fresh connection for each batch
+                try {
+                    await this.ensureFreshConnection();
+                } catch (connError) {
+                    log('error', `[Publisher] Failed to establish connection for batch #${batchNumber}, aborting. ${pendingEvents.length} messages will be retried later.`, connError);
+                    break;
+                }
+
+                let batchAborted = false;
+
                 for (let i = 0; i < sortedEvents.length; i++) {
                     const event = sortedEvents[i];
                     log('debug', `[Publisher] Processing pending event ${i + 1}/${sortedEvents.length}: ${event.messageId}`);
 
                     try {
-                        // Check if the channel/connection is still alive before each publish
-                        if (this.queue.closed) {
-                            log('warn', `[Publisher] Channel closed detected before publishing message ${event.messageId}, reconnecting...`);
-                            this.connected = false;
-                            await this.connect();
-                            log('info', `[Publisher] Reconnected successfully, resuming batch processing`);
-                        }
-
                         const destination = this.config.queue ?? this.config.exchange?.name!;
 
                         await this.queue.publish(
@@ -425,30 +426,34 @@ export class ResilientEventPublisher {
                         totalErrors++;
                         log('error', `[Publisher] Failed to publish pending message ${event.messageId}`, error);
 
-                        // If the channel is closed, try to reconnect for the remaining messages
-                        if (this.queue.closed) {
-                            log('warn', `[Publisher] Channel closed during batch processing, attempting reconnect for remaining messages...`);
-                            this.connected = false;
-                            try {
-                                await this.connect();
-                                log('info', `[Publisher] Reconnected after failure, continuing batch`);
-                            } catch (reconnectError) {
-                                log('error', `[Publisher] Reconnection failed, aborting batch processing. Remaining ${sortedEvents.length - i - 1} messages will be retried later.`, reconnectError);
-                                // Mark remaining events as still pending (they haven't been touched)
-                                // and break out of the loop
-                                break;
-                            }
-                        }
-
                         try {
                             await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
                         } catch (updateError) {
                             log('error', `[Publisher] Failed to update ERROR status for ${event.messageId}`, updateError);
                         }
+
+                        // If the channel/connection died, abort this batch immediately.
+                        // Remaining messages stay as PENDING and will be picked up in the next batch
+                        // with a fresh connection.
+                        if (this.queue.closed) {
+                            const remaining = sortedEvents.length - i - 1;
+                            log('warn', `[Publisher] Connection lost during batch #${batchNumber}. Aborting batch, ${remaining} remaining message(s) will be retried in the next cycle.`);
+                            batchAborted = true;
+                            break;
+                        }
                     }
                 }
 
+                // Always disconnect after each batch to release resources
+                await this.safeDisconnect();
+
                 log('debug', `[Publisher] Batch #${batchNumber} completed. Success: ${totalSuccess}, Errors: ${totalErrors}`);
+
+                // If the batch was aborted due to connection loss, stop processing more batches
+                if (batchAborted) {
+                    log('warn', `[Publisher] Stopping batch processing due to connection loss in batch #${batchNumber}`);
+                    break;
+                }
 
                 // Si el lote devolvió menos eventos que BATCH_SIZE, no hay más pendientes
                 if (pendingEvents.length < BATCH_SIZE) {
@@ -461,7 +466,51 @@ export class ResilientEventPublisher {
             }
         } catch (error) {
             log('error', '[Publisher] Error during pending events processing', error);
+            // Ensure connection is cleaned up on unexpected errors
+            await this.safeDisconnect();
             throw error;
         }
+    }
+
+    /**
+     * Ensures a fresh RabbitMQ connection by force-closing any existing stale connection
+     * and creating a new one.
+     * @private
+     */
+    private async ensureFreshConnection(): Promise<void> {
+        // Force-close any existing connection (stale or alive) to start clean
+        if (this.connected || !this.queue.closed) {
+            log('debug', '[Publisher] Closing existing connection before establishing a fresh one...');
+            await this.safeDisconnect();
+        }
+
+        log('debug', '[Publisher] Establishing fresh connection for batch...');
+        await this.queue.connect();
+        this.connected = true;
+        this.lastPublishTime = Date.now();
+        log('debug', '[Publisher] Fresh connection established');
+    }
+
+    /**
+     * Safely disconnects, handling already-dead connections gracefully.
+     * @private
+     */
+    private async safeDisconnect(): Promise<void> {
+        try {
+            if (this.queue.closed) {
+                // Connection is already dead, just force-close to clean up references
+                await this.queue.forceClose();
+            } else {
+                await this.queue.disconnect();
+            }
+        } catch (err) {
+            log('warn', '[Publisher] Error during safe disconnect, forcing close', err);
+            try {
+                await this.queue.forceClose();
+            } catch {
+                // Ignore - best effort cleanup
+            }
+        }
+        this.connected = false;
     }
 }

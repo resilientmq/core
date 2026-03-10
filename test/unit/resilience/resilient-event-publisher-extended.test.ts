@@ -8,6 +8,7 @@ jest.mock('../../../src/broker/amqp-queue', () => {
         AmqpQueue: jest.fn().mockImplementation(() => ({
             connect: jest.fn().mockResolvedValue(undefined),
             disconnect: jest.fn().mockResolvedValue(undefined),
+            forceClose: jest.fn().mockResolvedValue(undefined),
             publish: jest.fn().mockResolvedValue(undefined),
             closed: false
         }))
@@ -158,6 +159,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
             AmqpQueue.mockImplementationOnce(() => ({
                 connect: jest.fn().mockRejectedValue(new Error('Connection failed')),
                 disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockResolvedValue(undefined),
                 closed: false
             }));
@@ -176,6 +178,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockImplementation(async () => {
                     publishCount++;
                     if (publishCount === 2) {
@@ -234,6 +237,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
                 queueInstance = {
                     connect: mockConnect,
                     disconnect: jest.fn().mockResolvedValue(undefined),
+                    forceClose: jest.fn().mockResolvedValue(undefined),
                     publish: jest.fn().mockResolvedValue(undefined),
                     closed: false
                 };
@@ -262,6 +266,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockImplementation(() => new Promise(resolve => setTimeout(resolve, 10))),
                 closed: false
             }));

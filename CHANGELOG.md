@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.11] - 2026-03-10
+
+### Fixed
+
+- **Publisher (processPendingEvents)**: Fixed infinite reconnection loop and cascading `Channel ended, no reply will be forthcoming` errors during batch processing
+  - **Root cause**: The publisher opened a single connection at the start of `processPendingEvents` and kept it open across all batches. When the connection/channel died mid-batch (e.g., due to RabbitMQ idle timeout or server-side closure), every subsequent message in the loop attempted to reconnect on the same dead `AmqpQueue` instance, which failed repeatedly because the old connection was never properly cleaned up
+  - **New behavior**: Each batch now has its own **fresh connection lifecycle** — connect at the start of the batch, disconnect at the end. This prevents stale connections from accumulating and ensures clean resource management
+  - If a message fails due to a closed channel, the **entire batch is aborted immediately** instead of attempting per-message reconnection. Remaining messages stay as `PENDING` in the store and will be picked up in the next processing cycle with a fresh connection
+  - If the initial connection for a batch fails, the entire pending events processing is halted gracefully
+
+- **AmqpQueue (disconnect)**: Fixed potential infinite hang when `disconnect()` waits for in-flight messages on a dead connection
+  - Added a 10-second timeout to `waitForProcessing`. If in-flight messages don't complete within the timeout, the disconnect proceeds with a warning instead of blocking forever
+
+### Added
+
+- **AmqpQueue (forceClose)**: New method that forcefully cleans up dead or stale connections without waiting for in-flight messages
+  - Used internally by the publisher to clean up dead connections before establishing fresh ones
+  - Gracefully ignores errors on already-dead channels and connections
+
+- **Publisher (ensureFreshConnection)**: New private method that force-closes any existing connection (stale or alive) and creates a completely new one
+  - Ensures no leaked connections or channels when reconnecting after failures
+
+- **Publisher (safeDisconnect)**: New private method that handles disconnection gracefully, falling back to `forceClose` when the connection is already dead
+  - Prevents `disconnect()` from throwing or hanging on dead connections
+
 ## [1.2.10] - 2026-03-10
 
 ### Fixed

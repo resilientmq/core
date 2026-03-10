@@ -196,6 +196,7 @@ export class AmqpQueue implements MessageQueue {
 
     /**
      * Gracefully closes the channel and connection.
+     * Waits up to 10 seconds for in-flight messages to finish before forcing close.
      */
     async disconnect(): Promise<void> {
         if (this.closed) {
@@ -204,13 +205,16 @@ export class AmqpQueue implements MessageQueue {
 
         await this.cancelAllConsumers();
 
-        const waitForProcessing = async () => {
-            while (this.processingMessages > 0) {
-                await new Promise(resolve => setTimeout(resolve, 100)); // check each 100ms
+        // Wait for in-flight messages with a timeout to prevent infinite hangs
+        const WAIT_TIMEOUT_MS = 10000;
+        const startTime = Date.now();
+        while (this.processingMessages > 0) {
+            if (Date.now() - startTime > WAIT_TIMEOUT_MS) {
+                log('warn', `[AMQP] Timed out waiting for ${this.processingMessages} in-flight message(s) after ${WAIT_TIMEOUT_MS}ms, forcing close`);
+                break;
             }
-        };
-
-        await waitForProcessing();
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
 
         try {
             if (this._channel) {
@@ -231,6 +235,32 @@ export class AmqpQueue implements MessageQueue {
         this.closed = true;
     }
 
+    /**
+     * Forcefully closes and cleans up a dead or stale connection without waiting.
+     * Use this before reconnecting when the connection/channel is known to be dead.
+     */
+    async forceClose(): Promise<void> {
+        log('debug', '[AMQP] Force closing connection...');
+
+        try {
+            if (this._channel) {
+                await this._channel.close().catch(() => {});
+            }
+        } catch {
+            // Ignore - channel is already dead
+        }
+
+        try {
+            if (this._connection) {
+                await this._connection.close().catch(() => {});
+            }
+        } catch {
+            // Ignore - connection is already dead
+        }
+
+        this.closed = true;
+        log('debug', '[AMQP] Force close completed');
+    }
 
     /**
      * Alias for `disconnect()`.
