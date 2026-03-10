@@ -3,6 +3,17 @@
  * This file is executed before all test suites
  */
 
+// Undici/Testcontainers Node 18 Polyfills
+if (typeof global.File === 'undefined') {
+  const { File } = require('node:buffer');
+  global.File = File;
+}
+
+if (typeof global.Blob === 'undefined') {
+  const { Blob } = require('node:buffer');
+  global.Blob = Blob;
+}
+
 // Set default test timeout (can be overridden by specific configs)
 jest.setTimeout(30000);
 
@@ -32,7 +43,7 @@ expect.extend({
       };
     }
   },
-  
+
   toHaveBeenCalledWithEvent(received: jest.Mock, eventType: string) {
     const calls = received.mock.calls;
     const pass = calls.some(call => call[0]?.type === eventType);
@@ -48,16 +59,16 @@ expect.extend({
       };
     }
   },
-  
+
   toBeValidResilientEvent(received: any) {
-    const hasRequiredFields = 
+    const hasRequiredFields =
       received &&
       typeof received.id === 'string' &&
       typeof received.messageId === 'string' &&
       typeof received.type === 'string' &&
       received.payload !== undefined &&
       ['PENDING', 'PUBLISHED', 'PROCESSED', 'FAILED'].includes(received.status);
-    
+
     if (hasRequiredFields) {
       return {
         message: () => `expected ${JSON.stringify(received)} not to be a valid ResilientEvent`,
@@ -145,7 +156,7 @@ declare global {
     maxAttempts?: number,
     delayMs?: number
   ): Promise<T>;
-  
+
   namespace jest {
     interface Matchers<R> {
       toBeWithinRange(floor: number, ceiling: number): R;
