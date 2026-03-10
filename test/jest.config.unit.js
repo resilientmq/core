@@ -43,5 +43,6 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
   cacheDirectory: '<rootDir>/.jest-cache/unit',
   maxWorkers: '50%', // Use 50% of available CPU cores for parallel execution
-  detectOpenHandles: true
+  detectOpenHandles: true,
+  globalTeardown: '<rootDir>/test/teardown.js'
 };

@@ -35,5 +35,6 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
   maxWorkers: 1, // Run integration tests serially to avoid port conflicts
   cacheDirectory: '<rootDir>/.jest-cache/integration',
-  detectOpenHandles: true
+  detectOpenHandles: true,
+  globalTeardown: '<rootDir>/test/teardown.js'
 };

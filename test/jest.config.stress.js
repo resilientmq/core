@@ -27,5 +27,6 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
   maxWorkers: 1, // Run stress tests serially
   cacheDirectory: '<rootDir>/.jest-cache/stress',
-  detectOpenHandles: true
+  detectOpenHandles: true,
+  globalTeardown: '<rootDir>/test/teardown.js'
 };
