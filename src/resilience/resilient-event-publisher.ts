@@ -156,7 +156,7 @@ export class ResilientEventPublisher {
                 log('info', `[Publisher] Pending events done. Batches: ${batchNumber}, Success: ${totalSuccess}, Errors: ${totalErrors}`);
             }
         } catch (error) {
-            log('error', '[Publisher] Error during pending events processing', error);
+            log('error', '[Publisher] Error during pending events processing', error); 
             // Ensure connection is cleaned up on unexpected errors
             await this.disconnect();
             throw error;
