@@ -19,6 +19,7 @@ on:
       - 'tsconfig.json'
 
 env:
+  NODE_VERSION: '24'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -413,47 +414,227 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Download coverage
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: coverage-report
-          path: coverage-report/
+          path: artifacts/
         continue-on-error: true
 
       - name: Write summary
         run: |
-          {
-            echo "# CI/CD Summary"
-            echo ""
-            echo "| Job | Status |"
-            echo "|-----|--------|"
-            echo "| Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |"
-            echo "| Integration Tests | ${{ needs.integration-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |"
-            echo "| Stress Tests | ${{ needs.stress-tests.result == 'success' && '✅ Passed' || needs.stress-tests.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
-            echo "| Benchmarks | ${{ needs.benchmarks.result == 'success' && '✅ Passed' || needs.benchmarks.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
-            echo "| Build | ${{ needs.build.result == 'success' && '✅ Passed' || needs.build.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
-            echo "| Publish | ${{ needs.publish.result == 'success' && '✅ Published' || needs.publish.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
-            echo ""
+          node << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
 
-            SUMMARY="coverage-report/coverage-summary.json"
-            if [ -f "$SUMMARY" ]; then
-              LINES=$(node -e "try{const d=require('./$SUMMARY');process.stdout.write(String(d.total.lines.pct))}catch(e){process.stdout.write('N/A')}")
-              BRANCHES=$(node -e "try{const d=require('./$SUMMARY');process.stdout.write(String(d.total.branches.pct))}catch(e){process.stdout.write('N/A')}")
-              FUNCTIONS=$(node -e "try{const d=require('./$SUMMARY');process.stdout.write(String(d.total.functions.pct))}catch(e){process.stdout.write('N/A')}")
-              STATEMENTS=$(node -e "try{const d=require('./$SUMMARY');process.stdout.write(String(d.total.statements.pct))}catch(e){process.stdout.write('N/A')}")
-              echo "## Coverage"
-              echo ""
-              echo "| Metric | % |"
-              echo "|--------|---|"
-              echo "| Statements | ${STATEMENTS}% |"
-              echo "| Branches | ${BRANCHES}% |"
-              echo "| Functions | ${FUNCTIONS}% |"
-              echo "| Lines | ${LINES}% |"
-            fi
+          const out = [];
+          const push = (s = '') => out.push(s);
 
-            echo ""
-            echo "**Branch:** \`${{ github.ref_name }}\`  "
-            echo "**Commit:** \`${{ github.sha }}\`  "
-            echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-          } >> $GITHUB_STEP_SUMMARY
+          // ── helpers ──────────────────────────────────────────────────────────
+          function jobIcon(result) {
+            return result === 'success' ? '✅' : result === 'skipped' ? '⏭️' : result === 'failure' ? '❌' : '⚠️';
+          }
+
+          function parseJUnit(file) {
+            try {
+              const xml = fs.readFileSync(file, 'utf8');
+              const suites = [...xml.matchAll(/<testsuite[^>]*name="([^"]*)"[^>]*tests="(\d+)"[^>]*failures="(\d+)"[^>]*errors="(\d+)"[^>]*(?:time="([^"]*)")?[^>]*>/g)];
+              const cases  = [...xml.matchAll(/<testcase[^>]*name="([^"]*)"[^>]*(?:classname="([^"]*)")?[^>]*(?:time="([^"]*)")?[^>]*(?:\/>|>[\s\S]*?<\/testcase>)/g)];
+              const failed = [...xml.matchAll(/<testcase[^>]*name="([^"]*)"[\s\S]*?<(?:failure|error)[^>]*(?:message="([^"]*)")?/g)];
+              return { suites, cases, failed, raw: xml };
+            } catch { return null; }
+          }
+
+          function readJson(file) {
+            try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+          }
+
+          function artifactDir(...parts) {
+            const p = path.join('artifacts', ...parts);
+            return fs.existsSync(p) ? p : null;
+          }
+
+          // ── Pipeline status ───────────────────────────────────────────────────
+          push('# 🚀 CI/CD Pipeline Summary');
+          push('');
+          push('| Job | Result |');
+          push('|-----|--------|');
+          const jobs = [
+            ['Unit Tests',        '${{ needs.unit-tests.result }}'],
+            ['Integration Tests', '${{ needs.integration-tests.result }}'],
+            ['Stress Tests',      '${{ needs.stress-tests.result }}'],
+            ['Benchmarks',        '${{ needs.benchmarks.result }}'],
+            ['Build',             '${{ needs.build.result }}'],
+            ['Publish',           '${{ needs.publish.result }}'],
+          ];
+          for (const [name, result] of jobs) {
+            push(`| ${name} | ${jobIcon(result)} ${result} |`);
+          }
+          push('');
+          push(`> **Branch:** \`${{ github.ref_name }}\` &nbsp;|&nbsp; **Commit:** \`${{ github.sha }}\` &nbsp;|&nbsp; **Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`);
+
+          // ── Unit Tests detail ─────────────────────────────────────────────────
+          push('');
+          push('## 🧪 Unit Tests');
+          const nodeVersions = [18, 20, 22, 24, 25];
+          let unitTotals = { tests: 0, failures: 0, errors: 0, time: 0, nodes: 0 };
+          const unitRows = [];
+          for (const v of nodeVersions) {
+            const dir = artifactDir(`unit-results-node${v}`);
+            const file = dir ? path.join(dir, 'junit-unit.xml') : null;
+            const data = file && fs.existsSync(file) ? parseJUnit(file) : null;
+            if (data) {
+              let tests = 0, failures = 0, errors = 0, time = 0;
+              for (const s of data.suites) {
+                tests    += parseInt(s[2]) || 0;
+                failures += parseInt(s[3]) || 0;
+                errors   += parseInt(s[4]) || 0;
+                time     += parseFloat(s[5]) || 0;
+              }
+              const passed = tests - failures - errors;
+              const icon = failures + errors > 0 ? '❌' : '✅';
+              unitRows.push(`| Node ${v} | ${icon} | ${passed} | ${failures + errors} | ${tests} | ${time.toFixed(2)}s |`);
+              unitTotals.tests    += tests;
+              unitTotals.failures += failures + errors;
+              unitTotals.time     += time;
+              unitTotals.nodes++;
+            } else {
+              unitRows.push(`| Node ${v} | ⚠️ | — | — | — | — |`);
+            }
+          }
+          push('| Node | Status | Passed | Failed | Total | Time |');
+          push('|------|--------|--------|--------|-------|------|');
+          unitRows.forEach(r => push(r));
+          if (unitTotals.nodes > 0) {
+            push('');
+            push(`**Totals across all nodes:** ${unitTotals.tests - unitTotals.failures} passed, ${unitTotals.failures} failed, ${unitTotals.tests} total — ${unitTotals.time.toFixed(2)}s`);
+          }
+
+          // ── Integration Tests detail ──────────────────────────────────────────
+          push('');
+          push('## 🔗 Integration Tests');
+          const intRows = [];
+          let intTotals = { tests: 0, failures: 0, time: 0, nodes: 0 };
+          for (const v of nodeVersions) {
+            const dir = artifactDir(`integration-results-node${v}`);
+            const file = dir ? path.join(dir, 'junit-integration.xml') : null;
+            const data = file && fs.existsSync(file) ? parseJUnit(file) : null;
+            if (data) {
+              let tests = 0, failures = 0, errors = 0, time = 0;
+              for (const s of data.suites) {
+                tests    += parseInt(s[2]) || 0;
+                failures += parseInt(s[3]) || 0;
+                errors   += parseInt(s[4]) || 0;
+                time     += parseFloat(s[5]) || 0;
+              }
+              const passed = tests - failures - errors;
+              const icon = failures + errors > 0 ? '❌' : '✅';
+              intRows.push(`| Node ${v} | ${icon} | ${passed} | ${failures + errors} | ${tests} | ${time.toFixed(2)}s |`);
+              intTotals.tests    += tests;
+              intTotals.failures += failures + errors;
+              intTotals.time     += time;
+              intTotals.nodes++;
+            } else {
+              intRows.push(`| Node ${v} | ⚠️ | — | — | — | — |`);
+            }
+          }
+          push('| Node | Status | Passed | Failed | Total | Time |');
+          push('|------|--------|--------|--------|-------|------|');
+          intRows.forEach(r => push(r));
+          if (intTotals.nodes > 0) {
+            push('');
+            push(`**Totals across all nodes:** ${intTotals.tests - intTotals.failures} passed, ${intTotals.failures} failed, ${intTotals.tests} total — ${intTotals.time.toFixed(2)}s`);
+          }
+
+          // ── Stress Tests detail ───────────────────────────────────────────────
+          push('');
+          push('## 💪 Stress Tests');
+          const stressDir = artifactDir('stress-results');
+          if (stressDir) {
+            const files = fs.readdirSync(stressDir).filter(f => f.endsWith('.json'));
+            if (files.length > 0) {
+              push('| Test | Messages | Error Rate | Duration | Status |');
+              push('|------|----------|------------|----------|--------|');
+              for (const f of files) {
+                const d = readJson(path.join(stressDir, f));
+                if (d) {
+                  const errRate = d.errorRate ?? 'N/A';
+                  const msgs    = d.totalMessages ?? d.messagesSent ?? 'N/A';
+                  const dur     = d.duration ? `${d.duration}ms` : 'N/A';
+                  const icon    = typeof errRate === 'number' && errRate < 1 ? '✅' : '❌';
+                  push(`| ${f.replace('.json','')} | ${msgs} | ${typeof errRate === 'number' ? errRate.toFixed(2)+'%' : errRate} | ${dur} | ${icon} |`);
+                }
+              }
+            } else {
+              push('_No stress result files found._');
+            }
+          } else {
+            push('_No stress results artifact._');
+          }
+
+          // ── Benchmarks detail ─────────────────────────────────────────────────
+          push('');
+          push('## ⚡ Performance Benchmarks');
+          const benchDir = artifactDir('benchmark-results');
+          if (benchDir) {
+            const files = fs.readdirSync(benchDir).filter(f => f.endsWith('.json'));
+            if (files.length > 0) {
+              push('| Benchmark | Throughput | Avg Latency | P95 Latency | P99 Latency | Status |');
+              push('|-----------|------------|-------------|-------------|-------------|--------|');
+              for (const f of files) {
+                const d = readJson(path.join(benchDir, f));
+                if (d) {
+                  const tp  = d.throughput ?? d.publishThroughput ?? d.consumeThroughput ?? 'N/A';
+                  const avg = d.avgLatency ?? d.latency?.avg ?? 'N/A';
+                  const p95 = d.p95Latency ?? d.latency?.p95 ?? 'N/A';
+                  const p99 = d.p99Latency ?? d.latency?.p99 ?? 'N/A';
+                  const ok  = (typeof tp === 'number' && tp >= 100) && (typeof avg === 'number' && avg <= 1000);
+                  const icon = ok ? '✅' : typeof tp === 'number' || typeof avg === 'number' ? '❌' : '⚠️';
+                  push(`| ${f.replace('.json','')} | ${typeof tp === 'number' ? tp.toFixed(0)+' msg/s' : tp} | ${typeof avg === 'number' ? avg.toFixed(1)+'ms' : avg} | ${typeof p95 === 'number' ? p95.toFixed(1)+'ms' : p95} | ${typeof p99 === 'number' ? p99.toFixed(1)+'ms' : p99} | ${icon} |`);
+                }
+              }
+            } else {
+              push('_No benchmark result files found._');
+            }
+          } else {
+            push('_No benchmark results artifact._');
+          }
+
+          // ── Coverage ──────────────────────────────────────────────────────────
+          push('');
+          push('## 📊 Coverage (Node 20)');
+          const covFile = path.join('artifacts', 'coverage-report', 'coverage-summary.json');
+          if (fs.existsSync(covFile)) {
+            const cov = readJson(covFile);
+            if (cov && cov.total) {
+              const t = cov.total;
+              push('| Metric | % | Covered | Total |');
+              push('|--------|---|---------|-------|');
+              for (const k of ['statements', 'branches', 'functions', 'lines']) {
+                const m = t[k];
+                const bar = '█'.repeat(Math.round((m.pct||0)/10)) + '░'.repeat(10 - Math.round((m.pct||0)/10));
+                push(`| ${k.charAt(0).toUpperCase()+k.slice(1)} | ${bar} ${m.pct}% | ${m.covered} | ${m.total} |`);
+              }
+              // Per-file breakdown (top 10 lowest coverage)
+              const files = Object.entries(cov)
+                .filter(([k]) => k !== 'total')
+                .map(([k, v]) => ({ file: k.replace(process.cwd()+'/', ''), pct: v.lines?.pct ?? 0 }))
+                .sort((a, b) => a.pct - b.pct)
+                .slice(0, 10);
+              if (files.length > 0) {
+                push('');
+                push('<details><summary>📁 10 files with lowest line coverage</summary>');
+                push('');
+                push('| File | Lines % |');
+                push('|------|---------|');
+                files.forEach(f => push(`| \`${f.file}\` | ${f.pct}% |`));
+                push('');
+                push('</details>');
+              }
+            }
+          } else {
+            push('_Coverage report not available._');
+          }
+
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, out.join('\n') + '\n');
+          EOF
 
