@@ -8,7 +8,7 @@ let currentLevel: LogLevel = 'none';
 /**
  * Whether to include timestamps in log messages.
  */
-let includeTimestamps = true;
+let includeTimestamps = true; 
 
 /**
  * Updates the global log level for the library.
