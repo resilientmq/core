@@ -44,6 +44,8 @@ export class AmqpQueue implements MessageQueue {
             this._channel.on('error', (err) => log('error', '[AMQP] Channel error', err));
 
             await this._channel.prefetch(this._prefetchCount);
+            this.closed = false;
+            log('debug', '[AMQP] Connection established successfully');
         } catch (error) {
             this.closed = true;
             log('error', '[AMQP] Failed to connect', error);
@@ -148,6 +150,7 @@ export class AmqpQueue implements MessageQueue {
 
     /**
      * Gracefully closes the channel and connection.
+     * Waits up to 10 seconds for in-flight messages to finish before forcing close.
      */
     async disconnect(): Promise<void> {
         if (this.closed) return;
@@ -168,6 +171,16 @@ export class AmqpQueue implements MessageQueue {
     /** Alias for `disconnect()`. */
     async close(): Promise<void> {
         await this.disconnect();
+    }
+
+    /**
+     * Forces an immediate close of the connection without waiting for in-flight messages.
+     * Use when a clean shutdown is not possible (e.g., connection already broken).
+     */
+    async forceClose(): Promise<void> {
+        this.closed = true;
+        try { if (this._channel) await this._channel.close(); } catch {}
+        try { if (this._connection) await this._connection.close(); } catch {}
     }
 
     /* istanbul ignore next */

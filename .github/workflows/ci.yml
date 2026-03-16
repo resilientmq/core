@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        node-version: [18, 20, 22, 24]
+        node-version: [18, 20, 22, 24, 25]
       fail-fast: false
 
     steps:
@@ -90,7 +90,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        node-version: [18, 20, 22, 24]
+        node-version: [18, 20, 22, 24, 25]
       fail-fast: false
 
     services:

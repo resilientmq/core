@@ -831,7 +831,9 @@ describe('ResilientConsumer', () => {
             await new Promise(resolve => setTimeout(resolve, 300));
 
             // connect should be called at least twice (initial + reconnect)
-            expect(mockConnect).toHaveBeenCalledTimes(2);
+            // Note: timing variations across Node versions may cause additional reconnection
+            // cycles within the wait window (maxUptimeMs=100 + reconnectDelayMs=50 = 150ms per cycle)
+            expect(mockConnect.mock.calls.length).toBeGreaterThanOrEqual(2);
 
             await consumer.stop();
             jest.useFakeTimers();

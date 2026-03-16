@@ -155,7 +155,9 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockRejectedValue(new Error('Connection failed')),
                 disconnect: jest.fn(),
-                publish: jest.fn()
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn(),
+                closed: false
             }));
 
             publisher = new ResilientEventPublisher(config);
@@ -188,7 +190,9 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
-                publish: jest.fn().mockResolvedValue(undefined)
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
             }));
 
             publisher = new ResilientEventPublisher(config);
@@ -314,7 +318,9 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
-                publish: jest.fn().mockResolvedValue(undefined)
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
             }));
 
             publisher = new ResilientEventPublisher(config);
@@ -347,7 +353,9 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
-                publish: mockPublish
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: mockPublish,
+                closed: false
             }));
 
             config.queue = undefined;
@@ -385,7 +393,10 @@ describe('ResilientEventPublisher', () => {
             const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockRejectedValue(new Error('Connection failed')),
-                publish: jest.fn()
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn(),
+                closed: false
             }));
 
             // Force store.updateEventStatus to throw when it tries to set ERROR status
@@ -466,6 +477,7 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: mockDisconnect,
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockResolvedValue(undefined),
                 closed: false
             }));
@@ -527,6 +539,7 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockResolvedValue(undefined),
                 closed: false
             }));
@@ -554,6 +567,7 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: mockDisconnect,
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockResolvedValue(undefined),
                 closed: false
             }));
@@ -631,6 +645,7 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockResolvedValue(undefined),
                 closed: false
             }));
@@ -784,6 +799,7 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockResolvedValue(undefined),
                 closed: false
             }));
@@ -800,6 +816,7 @@ describe('ResilientEventPublisher', () => {
             const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn(),
                 closed: false
             }));
@@ -817,6 +834,7 @@ describe('ResilientEventPublisher', () => {
             const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
             AmqpQueue.mockImplementation(() => ({
                 connect: connectMock,
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn(),
                 closed: false
             }));
@@ -836,6 +854,7 @@ describe('ResilientEventPublisher', () => {
             const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
             AmqpQueue.mockImplementation(() => ({
                 connect: connectMock,
+                forceClose: jest.fn().mockResolvedValue(undefined),
                 publish: publishMock,
                 get closed() { return isClosed; },
                 set closed(val: boolean) { isClosed = val; }

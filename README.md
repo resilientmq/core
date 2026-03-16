@@ -2,7 +2,7 @@
 
 [![CI/CD Pipeline](https://github.com/resilientmq/core/actions/workflows/ci-cd.yml/badge.svg?branch=master)](https://github.com/resilientmq/core/actions/workflows/ci-cd.yml)
 [![npm version](https://badge.fury.io/js/@resilientmq%2Fcore.svg)](https://www.npmjs.com/package/@resilientmq/core)
-[![Node.js Version](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022%20%7C%2024-brightgreen.svg)](https://nodejs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022%20%7C%2024%20%7C%2025-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -455,7 +455,7 @@ npm run quality:check         # Run all quality gates
 All tests run automatically on:
 - Every push to main/master/develop branches
 - Every pull request
-- Matrix testing across Node.js 18, 20, 22 and 24
+- Matrix testing across Node.js 18, 20, 22, 24 and 25
 
 **Quality Gates:**
 - ✅ Minimum 70% code coverage

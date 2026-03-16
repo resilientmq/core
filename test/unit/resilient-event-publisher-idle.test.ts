@@ -18,6 +18,7 @@ describe('ResilientEventPublisher - Idle Connection Management', () => {
         mockQueue = new AmqpQueue('amqp://localhost') as jest.Mocked<AmqpQueue>;
         mockQueue.connect = jest.fn().mockResolvedValue(undefined);
         mockQueue.disconnect = jest.fn().mockResolvedValue(undefined);
+        mockQueue.forceClose = jest.fn().mockResolvedValue(undefined);
         mockQueue.publish = jest.fn().mockResolvedValue(undefined);
         mockQueue.closed = false;
 

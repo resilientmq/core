@@ -424,4 +424,27 @@ describe('AmqpQueue', () => {
             await expect(amqpQueue.disconnect()).resolves.not.toThrow();
         });
     });
+
+    describe('forceClose', () => {
+        it('should force close channel and connection immediately', async () => {
+            await amqpQueue.connect();
+            const channelCloseSpy = jest.spyOn(amqpQueue.channel, 'close');
+            const connectionCloseSpy = jest.spyOn(amqpQueue.connection, 'close');
+
+            await amqpQueue.forceClose();
+
+            expect(amqpQueue.closed).toBe(true);
+            expect(channelCloseSpy).toHaveBeenCalled();
+            expect(connectionCloseSpy).toHaveBeenCalled();
+        });
+
+        it('should swallow errors during force close', async () => {
+            await amqpQueue.connect();
+            jest.spyOn(amqpQueue.channel, 'close').mockRejectedValue(new Error('Channel error'));
+            jest.spyOn(amqpQueue.connection, 'close').mockRejectedValue(new Error('Connection error'));
+
+            await expect(amqpQueue.forceClose()).resolves.not.toThrow();
+            expect(amqpQueue.closed).toBe(true);
+        });
+    });
 });

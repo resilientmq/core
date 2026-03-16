@@ -157,6 +157,8 @@ export class ResilientEventPublisher {
             }
         } catch (error) {
             log('error', '[Publisher] Error during pending events processing', error);
+            // Ensure connection is cleaned up on unexpected errors
+            await this.disconnect();
             throw error;
         }
     }
