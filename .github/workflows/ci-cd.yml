@@ -354,6 +354,12 @@ jobs:
           registry-url: 'https://registry.npmjs.org/'
           cache: 'npm'
 
+      # 🔥 PASO AÑADIDO: Descargar los compilados del job "build"
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+
       - run: npm ci
 
       - name: Get package info
@@ -637,4 +643,3 @@ jobs:
 
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, out.join('\n') + '\n');
           EOF
-
