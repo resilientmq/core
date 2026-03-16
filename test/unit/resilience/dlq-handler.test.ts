@@ -285,5 +285,52 @@ describe('DLQHandler', () => {
             expect(publishedEvent.properties?.headers?.['x-original-routing-key']).toBe('my-custom-key');
             expect(publishedEvent.properties?.headers?.['x-error-stack']).toBe('');
         });
+
+        it('should use x-first-death-exchange when present (first OR branch)', async () => {
+            const dlqConfig = {
+                queue: 'test.dlq',
+                exchange: { name: 'dlq.exchange', type: 'direct' as const, options: { durable: true } }
+            };
+
+            testEvent.properties = {
+                ...testEvent.properties,
+                headers: {
+                    'x-first-death-exchange': 'first-death-exch',
+                    'x-first-death-queue': 'first-death-q',
+                    'x-first-death-routing-key': 'first-death-rk'
+                }
+            };
+
+            await handleDLQ(dlqConfig, mockBroker, testEvent, undefined, 2, 'orig-queue');
+
+            const publishedEvent = mockBroker.publish.mock.calls[0][1];
+            expect(publishedEvent.properties?.headers?.['x-first-death-exchange']).toBe('first-death-exch');
+            expect(publishedEvent.properties?.headers?.['x-first-death-queue']).toBe('first-death-q');
+            expect(publishedEvent.properties?.headers?.['x-first-death-routing-key']).toBe('first-death-rk');
+            // x-death-reason should be 'expired' since no error
+            expect(publishedEvent.properties?.headers?.['x-death-reason']).toBe('expired');
+            // x-death-count should use provided attempts
+            expect(publishedEvent.properties?.headers?.['x-death-count']).toBe(2);
+        });
+
+        it('should handle event with no properties (undefined properties)', async () => {
+            const dlqConfig = {
+                queue: 'test.dlq',
+                exchange: {
+                    name: 'dlq.exchange',
+                    type: 'direct' as const,
+                    options: { durable: true }
+                }
+            };
+
+            // Remove properties entirely to cover the ?. branch in ...event.properties?.headers
+            const eventNoProps = { ...testEvent, properties: undefined as any };
+
+            await handleDLQ(dlqConfig, mockBroker, eventNoProps);
+
+            expect(mockBroker.publish).toHaveBeenCalled();
+            const publishedEvent = mockBroker.publish.mock.calls[0][1];
+            expect(publishedEvent.properties?.headers?.['x-death-reason']).toBe('expired');
+        });
     });
 });

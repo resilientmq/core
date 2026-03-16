@@ -162,6 +162,13 @@ export type ResilientConsumerConfig = {
      * @default 1000
      */
     storeConnectionRetryDelayMs?: number;
+
+    /**
+     * When true, enables real-time metrics collection for this consumer.
+     * Access metrics via `consumer.getMetrics()`.
+     * @default false
+     */
+    metricsEnabled?: boolean;
 };
 
 /**
@@ -276,4 +283,11 @@ export type ResilientPublisherConfig = {
      * @default 10000 (10 seconds)
      */
     idleTimeoutMs?: number;
+
+    /**
+     * When true, enables real-time metrics collection for this publisher.
+     * Access metrics via `publisher.getMetrics()`.
+     * @default false
+     */
+    metricsEnabled?: boolean;
 };

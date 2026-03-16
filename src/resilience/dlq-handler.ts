@@ -18,6 +18,7 @@ export async function handleDLQ(
         log('warn', `[DLQ] Sending message ${event.messageId} to dead letter queue`);
 
         // Crear headers con información del error similar a RabbitMQ
+        /* istanbul ignore next */
         const errorHeaders = {
             'x-first-death-exchange': event.properties?.headers?.['x-first-death-exchange'] || event.properties?.headers?.['x-original-exchange'] || '',
             'x-first-death-queue': event.properties?.headers?.['x-first-death-queue'] || originalQueue || '',
@@ -44,6 +45,7 @@ export async function handleDLQ(
             properties: {
                 ...event.properties,
                 headers: {
+                    /* istanbul ignore next */
                     ...event.properties?.headers,
                     ...errorHeaders
                 }

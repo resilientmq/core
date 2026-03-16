@@ -377,6 +377,25 @@ describe('AmqpQueue', () => {
         });
     });
 
+    describe('getters', () => {
+        it('should expose connection getter', async () => {
+            await amqpQueue.connect();
+            const conn = amqpQueue.connection;
+            expect(conn).toBeDefined();
+        });
+
+        it('should expose channel getter', async () => {
+            await amqpQueue.connect();
+            const ch = amqpQueue.channel;
+            expect(ch).toBeDefined();
+        });
+
+        it('should expose prefetchCount getter', async () => {
+            await amqpQueue.connect(5);
+            expect(amqpQueue.prefetchCount).toBe(5);
+        });
+    });
+
     describe('disconnect edge cases', () => {
         it('should handle cancel error', async () => {
             await amqpQueue.connect();

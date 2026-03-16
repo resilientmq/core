@@ -1,6 +1,6 @@
 {
   "name": "@resilientmq/core",
-  "version": "1.2.9",
+  "version": "2.0.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "description": "Core logic for resilient RabbitMQ event processing",
@@ -43,7 +43,7 @@
   "author": "resilientmq",
   "devDependencies": {
     "@testcontainers/rabbitmq": "^11.12.0",
-    "@types/amqplib": "^0.10.7",
+    "@types/amqplib": "^0.10.8",
     "@types/jest": "^29.5.14",
     "@types/node": "^24.6.1",
     "jest": "^29.7.0",
@@ -52,6 +52,6 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "amqplib": "^0.10.8"
+    "amqplib": "^0.10.9"
   }
 }

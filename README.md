@@ -19,6 +19,7 @@ Core logic for the resilient message queue system built on top of RabbitMQ, prov
   - [🔄 Example: Custom Storage Serializer](#-example-custom-storage-serializer)
 - [🚀 Example: Consumer](#-example-consumer)
 - [🚀 Example: Publisher](#-example-publisher)
+- [📊 Metrics](#-metrics)
 - [🧪 Testing](#-testing)
 - [👥 Contributors](#-contributors)
 - [📄 License](#-license)
@@ -326,6 +327,85 @@ async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<Even
   });
 }
 ```
+
+---
+
+## 📊 Metrics
+
+`ResilientConsumer` and `ResilientEventPublisher` support optional real-time metrics collection.
+Enable it with `metricsEnabled: true` in the config, then call `getMetrics()` at any time to get
+a snapshot.
+
+```ts
+import { ResilientConsumer, ResilientEventPublisher } from '@resilientmq/core';
+
+// Consumer with metrics
+const consumer = new ResilientConsumer({
+  connection: 'amqp://localhost',
+  consumeQueue: { queue: 'my.queue' },
+  eventsToProcess: [{ type: 'order.created', handler: async (e) => { /* ... */ } }],
+  metricsEnabled: true,   // <-- enable metrics
+});
+
+await consumer.start();
+
+// Inspect metrics at any time
+const snap = consumer.getMetrics();
+console.log(snap);
+// {
+//   messagesReceived: 142,
+//   messagesProcessed: 140,
+//   messagesRetried: 3,
+//   messagesFailed: 2,
+//   messagesSentToDLQ: 2,
+//   messagesPublished: 0,
+//   processingErrors: 2,
+//   avgProcessingTimeMs: 18.4,
+//   lastActivityAt: 2026-03-16T10:23:45.000Z
+// }
+```
+
+```ts
+// Publisher with metrics
+const publisher = new ResilientEventPublisher({
+  connection: 'amqp://localhost',
+  queue: 'my.queue',
+  metricsEnabled: true,   // <-- enable metrics
+});
+
+await publisher.publish({ messageId: 'id-1', type: 'order.created', payload: {} });
+
+const snap = publisher.getMetrics();
+console.log(snap?.messagesPublished); // 1
+```
+
+You can also use `MetricsCollector` standalone for custom instrumentation:
+
+```ts
+import { MetricsCollector } from '@resilientmq/core';
+
+const metrics = new MetricsCollector();
+metrics.increment('messagesReceived');
+metrics.recordProcessingTime(42);
+const snapshot = metrics.getSnapshot();
+metrics.reset(); // reset all counters
+```
+
+### Available Metrics
+
+| Field | Description |
+|-------|-------------|
+| `messagesReceived` | Total messages received by the consumer |
+| `messagesProcessed` | Messages successfully processed |
+| `messagesRetried` | Messages retried at least once |
+| `messagesFailed` | Messages that failed permanently |
+| `messagesSentToDLQ` | Messages sent to the Dead Letter Queue |
+| `messagesPublished` | Messages published by the publisher |
+| `processingErrors` | Total processing errors encountered |
+| `avgProcessingTimeMs` | Average processing time in milliseconds |
+| `lastActivityAt` | Timestamp of the last recorded activity |
+
+> `getMetrics()` returns `undefined` when `metricsEnabled` is not set or is `false`.
 
 ---
 

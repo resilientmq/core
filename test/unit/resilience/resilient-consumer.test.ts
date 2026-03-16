@@ -661,6 +661,8 @@ describe('ResilientConsumer', () => {
                 consume: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
                 cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                waitForProcessing: jest.fn().mockResolvedValue(undefined),
+                processingMessages: 0,
                 channel: {
                     assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
                     assertExchange: jest.fn().mockResolvedValue({}),
@@ -894,6 +896,128 @@ describe('ResilientConsumer', () => {
 
             await consumer.stop();
             jest.useFakeTimers();
+        });
+
+        it('should catch error in revertRetryEvents when store.getEventsByStatus throws', async () => {
+            consumer = new ResilientConsumer(config);
+
+            // Mock store to throw on getEventsByStatus
+            mockStore.getEventsByStatus = jest.fn().mockRejectedValue(new Error('Store error during revert'));
+
+            // Should not throw — error is caught internally
+            await expect((consumer as any).revertRetryEvents()).resolves.not.toThrow();
+        });
+
+        it('should check store connection inside consume callback when storeConnected is false', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            let consumeCallback: any;
+
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockImplementation(async (_queue: string, callback: any) => {
+                    consumeCallback = callback;
+                }),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            // Force storeConnected to false to trigger the reconnect path inside consume callback
+            (consumer as any).storeConnected = false;
+            const checkStoreSpy = jest.spyOn(consumer as any, 'checkStoreConnection').mockResolvedValue(undefined);
+
+            const testEvent = {
+                messageId: 'msg-store-reconnect',
+                type: 'test.event',
+                payload: {},
+                properties: {}
+            };
+
+            if (consumeCallback) {
+                await consumeCallback(testEvent);
+            }
+
+            expect(checkStoreSpy).toHaveBeenCalled();
+        });
+
+        it('should log error when idle check throws', async () => {
+            jest.useRealTimers();
+
+            const mockCheckQueue = jest.fn()
+                .mockResolvedValueOnce({ queue: 'test.queue', messageCount: 0 }) // first call succeeds (setup)
+                .mockRejectedValue(new Error('Queue check failed')); // subsequent calls fail
+
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                waitForProcessing: jest.fn().mockResolvedValue(undefined),
+                processingMessages: 0,
+                channel: {
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: mockCheckQueue
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            config.exitIfIdle = true;
+            config.idleCheckIntervalMs = 50;
+            config.maxIdleChecks = 10;
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            // Wait for idle check to fire and fail
+            await new Promise(resolve => setTimeout(resolve, 120));
+
+            await consumer.stop();
+            jest.useFakeTimers();
+        }, 5000);
+
+        it('should call checkStoreConnection in setupAndConsume when store is configured but not connected', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            consumer = new ResilientConsumer(config);
+
+            // Ensure storeConnected is false so setupAndConsume calls checkStoreConnection
+            (consumer as any).storeConnected = false;
+            const checkStoreSpy = jest.spyOn(consumer as any, 'checkStoreConnection').mockResolvedValue(undefined);
+
+            await consumer.start();
+
+            // checkStoreConnection should have been called from setupAndConsume (line 72)
+            expect(checkStoreSpy).toHaveBeenCalled();
         });
     });
 });

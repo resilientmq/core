@@ -52,4 +52,14 @@ export interface EventStore {
      * @returns Array of pending events. Order is handled by the publisher.
      */
     getPendingEvents?(status: EventPublishStatus, limit?: number): Promise<EventMessage[]>;
+
+    /**
+     * Retrieves all events with the specified status.
+     * This method is optional. When implemented, it is used by ResilientConsumer
+     * during graceful shutdown to find events in RETRY state and revert them to ERROR.
+     *
+     * @param status - The status to filter events by (e.g., RETRY).
+     * @returns Array of events matching the given status.
+     */
+    getEventsByStatus?(status: EventConsumeStatus | EventPublishStatus): Promise<EventMessage[]>;
 }

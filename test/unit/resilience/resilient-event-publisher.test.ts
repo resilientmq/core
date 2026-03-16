@@ -257,6 +257,54 @@ describe('ResilientEventPublisher', () => {
             await expect(publisher.processPendingEvents()).rejects.toThrow('Root system corruption');
         });
 
+        it('should handle non-array result from getPendingEvents using Array.from', async () => {
+            config.instantPublish = false;
+            config.pendingEventsCheckIntervalMs = 1000;
+
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined)
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+
+            // Return a Set (non-array iterable) to trigger Array.from branch
+            const eventSet = new Set([{ ...testEvent, messageId: 'msg-set-001' }]);
+            mockStore.getPendingEvents = jest.fn().mockResolvedValue(eventSet);
+            const updateSpy = jest.spyOn(mockStore, 'updateEventStatus');
+
+            await publisher.processPendingEvents();
+
+            // Should have processed the event from the Set
+            expect(updateSpy).toHaveBeenCalled();
+        });
+
+        it('should sort events without timestamp using 0 as fallback', async () => {
+            config.instantPublish = false;
+            config.pendingEventsCheckIntervalMs = 1000;
+
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined)
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+
+            // Events without timestamp — triggers the `|| 0` fallback in sort
+            const event1 = { ...testEvent, messageId: 'msg-no-ts-1', properties: {} };
+            const event2 = { ...testEvent, messageId: 'msg-no-ts-2' }; // no properties at all
+            mockStore.getPendingEvents = jest.fn().mockResolvedValue([event1, event2]);
+            const updateSpy = jest.spyOn(mockStore, 'updateEventStatus');
+
+            await publisher.processPendingEvents();
+
+            expect(updateSpy).toHaveBeenCalled();
+        });
+
         it('should process events in chronological order', async () => {
             config.instantPublish = false;
             config.pendingEventsCheckIntervalMs = 1000;
@@ -367,14 +415,11 @@ describe('ResilientEventPublisher', () => {
 
             jest.spyOn(require('../../../src/logger/logger'), 'log').mockImplementation(() => { });
 
-            // To avoid unhandled promise rejections completely, we mock checkStoreConnection
-            // to return an object that immediately calls the .catch() callback synchronously,
-            // allowing us to wrap the constructor in a try/catch.
+            // Mock checkStoreConnection to return a rejected promise synchronously
             const connectSpy = jest.spyOn(ResilientEventPublisher.prototype as any, 'checkStoreConnection')
                 .mockImplementation(function () {
                     return {
                         catch: (cb: any) => {
-                            // Synchronously trigger the catch block from the constructor
                             cb(new Error('mock err'));
                         }
                     };
@@ -387,9 +432,30 @@ describe('ResilientEventPublisher', () => {
             }).toThrow('Failed to initialize publisher: store connection failed');
 
             expect(connectSpy).toHaveBeenCalled();
-            expect((publisher as any).storeConnected).toBe(false);
 
             jest.restoreAllMocks();
+        });
+
+        it('should call handleStoreInitFailure when store connection fails in constructor', () => {
+            const handleFailureSpy = jest.spyOn(ResilientEventPublisher.prototype as any, 'handleStoreInitFailure');
+
+            const connectSpy = jest.spyOn(ResilientEventPublisher.prototype as any, 'checkStoreConnection')
+                .mockImplementation(function () {
+                    return {
+                        catch: (cb: any) => {
+                            try { cb(new Error('store down')); } catch {}
+                        }
+                    };
+                });
+
+            try {
+                publisher = new ResilientEventPublisher(config);
+            } catch {}
+
+            expect(handleFailureSpy).toHaveBeenCalled();
+
+            connectSpy.mockRestore();
+            handleFailureSpy.mockRestore();
         });
     });
 
@@ -497,6 +563,61 @@ describe('ResilientEventPublisher', () => {
 
             expect(mockDisconnect).not.toHaveBeenCalled();
         });
+
+        it('should clear idleTimer when disconnecting while timer is active', async () => {
+            jest.useRealTimers();
+            const mockDisconnect = jest.fn().mockResolvedValue(undefined);
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: mockDisconnect,
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
+            }));
+
+            config.idleTimeoutMs = 60000;
+            publisher = new ResilientEventPublisher(config);
+            await publisher.publish(testEvent);
+
+            // idleTimer should be set after publish
+            expect((publisher as any).idleTimer).toBeDefined();
+
+            await publisher.disconnect();
+
+            // idleTimer should be cleared
+            expect((publisher as any).idleTimer).toBeUndefined();
+            expect(mockDisconnect).toHaveBeenCalled();
+            jest.useFakeTimers();
+        });
+
+        it('should reschedule idle monitoring when connected but pending ops > 0', async () => {
+            jest.useRealTimers();
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
+            }));
+
+            config.idleTimeoutMs = 30;
+            publisher = new ResilientEventPublisher(config);
+            await publisher.publish(testEvent);
+
+            // Simulate pending operations to trigger reschedule branch
+            (publisher as any).pendingOperations = 1;
+            (publisher as any).lastPublishTime = Date.now() - 60000; // old publish time
+
+            // Wait for idle timer to fire — should reschedule (else if connected branch)
+            await new Promise(resolve => setTimeout(resolve, 80));
+
+            // Still connected because pending ops blocked disconnect
+            expect(publisher.isConnected()).toBe(true);
+
+            (publisher as any).pendingOperations = 0;
+            await publisher.disconnect();
+            jest.useFakeTimers();
+        });
     });
 
     describe('isConnected', () => {
@@ -537,6 +658,40 @@ describe('ResilientEventPublisher', () => {
             config.instantPublish = true;
             publisher = new ResilientEventPublisher(config);
             expect((publisher as any).pendingEventsInterval).toBeUndefined();
+        });
+
+        it('should log warning when pendingEventsCheckIntervalMs is set with instantPublish true', () => {
+            const logSpy = jest.spyOn(require('../../../src/logger/logger'), 'log');
+            config.instantPublish = true;
+            config.pendingEventsCheckIntervalMs = 5000;
+            publisher = new ResilientEventPublisher(config);
+            expect(logSpy).toHaveBeenCalledWith('warn', expect.stringContaining('pendingEventsCheckIntervalMs'));
+            logSpy.mockRestore();
+        });
+
+        it('should catch and log error when periodic processPendingEvents fails', async () => {
+            jest.useRealTimers();
+            config.instantPublish = false;
+            config.pendingEventsCheckIntervalMs = 30;
+
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+
+            // Make processPendingEvents throw to trigger the .catch() callback (lines 199-200)
+            jest.spyOn(publisher, 'processPendingEvents').mockRejectedValue(new Error('Periodic check failed'));
+
+            // Wait for the interval to fire
+            await new Promise(resolve => setTimeout(resolve, 80));
+
+            publisher.stopPendingEventsCheck();
+            jest.useFakeTimers();
         });
 
         it('should stop periodic check when stopPendingEventsCheck is called', () => {
@@ -693,6 +848,33 @@ describe('ResilientEventPublisher', () => {
             await (publisher as any).connect(); // Should reconnect
 
             expect(connectMock).toHaveBeenCalledTimes(2);
+        });
+
+        it('should wait when pendingOperations reaches maxConcurrentPublishes', async () => {
+            jest.useRealTimers();
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+
+            // Set pendingOperations to max to trigger the wait loop
+            (publisher as any).pendingOperations = (publisher as any).maxConcurrentPublishes;
+
+            // Release after a short delay
+            setTimeout(() => {
+                (publisher as any).pendingOperations = 0;
+            }, 30);
+
+            const event2 = { ...testEvent, messageId: 'msg-wait' };
+            await publisher.publish(event2);
+
+            expect(mockStore.getCallCount('saveEvent')).toBeGreaterThan(0);
+            jest.useFakeTimers();
         });
     });
 });

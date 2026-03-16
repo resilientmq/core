@@ -280,3 +280,86 @@ describe('ResilientEventPublisher - Extended Tests', () => {
         });
     });
 });
+
+describe('ResilientEventPublisher - Metrics', () => {
+    let mockStore: EventStoreMock;
+
+    beforeEach(() => {
+        mockStore = new EventStoreMock();
+        const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+        AmqpQueue.mockImplementation(() => ({
+            connect: jest.fn().mockResolvedValue(undefined),
+            disconnect: jest.fn().mockResolvedValue(undefined),
+            publish: jest.fn().mockResolvedValue(undefined),
+            closed: false,
+        }));
+    });
+
+    afterEach(() => {
+        mockStore.clear();
+        jest.clearAllMocks();
+    });
+
+    it('should return undefined from getMetrics() when metricsEnabled is false', () => {
+        const pub = new ResilientEventPublisher({
+            connection: 'amqp://localhost',
+            queue: 'q',
+            store: mockStore,
+        });
+        expect(pub.getMetrics()).toBeUndefined();
+    });
+
+    it('should return a snapshot from getMetrics() when metricsEnabled is true', () => {
+        const pub = new ResilientEventPublisher({
+            connection: 'amqp://localhost',
+            queue: 'q',
+            store: mockStore,
+            metricsEnabled: true,
+        });
+        const snap = pub.getMetrics();
+        expect(snap).toBeDefined();
+        expect(snap!.messagesPublished).toBe(0);
+    });
+
+    it('should increment messagesPublished on successful publish', async () => {
+        const pub = new ResilientEventPublisher({
+            connection: 'amqp://localhost',
+            queue: 'q',
+            store: mockStore,
+            metricsEnabled: true,
+        });
+
+        const event: EventMessage = { messageId: 'pub-1', type: 'test', payload: {}, properties: {} };
+        await pub.publish(event);
+
+        const snap = pub.getMetrics()!;
+        expect(snap.messagesPublished).toBe(1);
+        expect(snap.processingErrors).toBe(0);
+
+        await pub.disconnect();
+    });
+
+    it('should increment processingErrors on publish failure', async () => {
+        const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+        AmqpQueue.mockImplementationOnce(() => ({
+            connect: jest.fn().mockRejectedValue(new Error('conn fail')),
+            disconnect: jest.fn().mockResolvedValue(undefined),
+            publish: jest.fn().mockResolvedValue(undefined),
+            closed: false,
+        }));
+
+        const pub = new ResilientEventPublisher({
+            connection: 'amqp://localhost',
+            queue: 'q',
+            store: mockStore,
+            metricsEnabled: true,
+        });
+
+        const event: EventMessage = { messageId: 'pub-err', type: 'test', payload: {}, properties: {} };
+        try { await pub.publish(event); } catch { /* expected */ }
+
+        const snap = pub.getMetrics()!;
+        expect(snap.processingErrors).toBe(1);
+        expect(snap.messagesPublished).toBe(0);
+    });
+});

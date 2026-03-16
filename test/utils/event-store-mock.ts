@@ -15,6 +15,7 @@ export class EventStoreMock implements EventStore {
     private failOnGet: boolean = false;
     private failOnDelete: boolean = false;
     private failOnGetPending: boolean = false;
+    private failOnGetByStatus: boolean = false;
 
     /**
      * Simulates failures on saveEvent calls.
@@ -54,6 +55,14 @@ export class EventStoreMock implements EventStore {
      */
     setFailOnGetPending(fail: boolean): void {
         this.failOnGetPending = fail;
+    }
+
+    /**
+     * Simulates failures on getEventsByStatus calls.
+     * @param fail If true, getEventsByStatus will throw an error
+     */
+    setFailOnGetByStatus(fail: boolean): void {
+        this.failOnGetByStatus = fail;
     }
 
     async saveEvent(event: EventMessage): Promise<void> {
@@ -120,6 +129,25 @@ export class EventStoreMock implements EventStore {
         return pendingEvents;
     }
 
+    async getEventsByStatus(
+        status: EventConsumeStatus | EventPublishStatus
+    ): Promise<EventMessage[]> {
+        this.incrementCallCount('getEventsByStatus');
+
+        if (this.failOnGetByStatus) {
+            throw new Error('EventStore: getEventsByStatus failed (simulated)');
+        }
+
+        const matchingEvents: EventMessage[] = [];
+        for (const event of this.events.values()) {
+            if (event.status === status) {
+                matchingEvents.push({ ...event });
+            }
+        }
+
+        return matchingEvents;
+    }
+
     /**
      * Clears all stored events and resets call counts.
      * Useful for test cleanup between test cases.
@@ -132,6 +160,7 @@ export class EventStoreMock implements EventStore {
         this.failOnGet = false;
         this.failOnDelete = false;
         this.failOnGetPending = false;
+        this.failOnGetByStatus = false;
     }
 
     /**

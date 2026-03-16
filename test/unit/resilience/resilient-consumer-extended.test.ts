@@ -421,6 +421,28 @@ describe('ResilientConsumer - Extended Tests', () => {
             // Should not throw even if disconnect fails
             await expect(consumer.stop()).resolves.not.toThrow();
         });
+
+        it('should remove SIGTERM/SIGINT listeners on stop', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                channel: mockChannel,
+                connection: mockConnection,
+                closed: false
+            }));
+
+            const removeListenerSpy = jest.spyOn(process, 'removeListener');
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+            await consumer.stop();
+
+            expect(removeListenerSpy).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
+            expect(removeListenerSpy).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+            removeListenerSpy.mockRestore();
+        });
     });
 
     describe('queue configuration', () => {
@@ -482,5 +504,287 @@ describe('ResilientConsumer - Extended Tests', () => {
                 })
             );
         });
+    });
+
+    describe('reconnect', () => {
+        it('should not reconnect if already reconnecting', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                channel: mockChannel,
+                connection: mockConnection,
+                closed: false
+            }));
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            // Set reconnecting to true to trigger early return
+            (consumer as any).reconnecting = true;
+            const stopTimersSpy = jest.spyOn(consumer as any, 'stopTimers');
+
+            await (consumer as any).reconnect();
+
+            // stopTimers should NOT have been called since we returned early
+            expect(stopTimersSpy).not.toHaveBeenCalled();
+        });
+
+        it('should execute reconnect flow and schedule restart', async () => {
+            jest.useFakeTimers();
+            const mockConnect = jest.fn().mockResolvedValue(undefined);
+            const mockConsume = jest.fn().mockResolvedValue(undefined);
+            const mockCancelAllConsumers = jest.fn().mockResolvedValue(undefined);
+            const mockChannelClose = jest.fn().mockResolvedValue(undefined);
+
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: mockConnect,
+                consume: mockConsume,
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: mockCancelAllConsumers,
+                waitForProcessing: jest.fn().mockResolvedValue(undefined),
+                channel: { ...mockChannel, close: mockChannelClose },
+                connection: { ...mockConnection, close: jest.fn().mockResolvedValue(undefined) },
+                closed: false
+            }));
+
+            config.reconnectDelayMs = 100;
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            // Trigger reconnect
+            const reconnectPromise = (consumer as any).reconnect();
+            await reconnectPromise;
+
+            expect(mockCancelAllConsumers).toHaveBeenCalled();
+            expect(mockChannelClose).toHaveBeenCalled();
+
+            // Advance timer to trigger the restart
+            jest.advanceTimersByTime(200);
+            jest.useRealTimers();
+        });
+
+        it('should handle errors during reconnect cleanup gracefully', async () => {
+            jest.useFakeTimers();
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockRejectedValue(new Error('Cancel failed')),
+                waitForProcessing: jest.fn().mockResolvedValue(undefined),
+                channel: { ...mockChannel, close: jest.fn().mockResolvedValue(undefined) },
+                connection: mockConnection,
+                closed: false
+            }));
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            // Should not throw even if cancelAllConsumers fails
+            await expect((consumer as any).reconnect()).resolves.not.toThrow();
+            jest.useRealTimers();
+        });
+    });
+
+    describe('checkStoreConnection retry delay', () => {
+        it('should retry store connection with delay between attempts', async () => {
+            jest.useRealTimers();
+            let callCount = 0;
+            mockStore.getEvent = jest.fn().mockImplementation(async () => {
+                callCount++;
+                if (callCount < 2) throw new Error('Store not ready');
+                return null;
+            });
+
+            config.storeConnectionRetries = 2;
+            config.storeConnectionRetryDelayMs = 10;
+            consumer = new ResilientConsumer(config);
+
+            // Should succeed on second attempt
+            await expect((consumer as any).checkStoreConnection()).resolves.not.toThrow();
+            expect(callCount).toBe(2);
+            jest.useFakeTimers();
+        }, 5000);
+    });
+
+    describe('SIGTERM/SIGINT signal handlers', () => {
+        const buildMockQueue = () => ({
+            connect: jest.fn().mockResolvedValue(undefined),
+            consume: jest.fn().mockResolvedValue(undefined),
+            disconnect: jest.fn().mockResolvedValue(undefined),
+            cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+            waitForProcessing: jest.fn().mockResolvedValue(undefined),
+            channel: mockChannel,
+            connection: mockConnection,
+            closed: false,
+        });
+
+        it('should invoke stop() when SIGTERM is emitted', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => buildMockQueue());
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            const stopSpy = jest.spyOn(consumer, 'stop').mockResolvedValue(undefined);
+
+            // Emit SIGTERM — this executes the () => this.stop() arrow function
+            process.emit('SIGTERM');
+
+            expect(stopSpy).toHaveBeenCalled();
+            stopSpy.mockRestore();
+        });
+
+        it('should invoke stop() when SIGINT is emitted', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => buildMockQueue());
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            const stopSpy = jest.spyOn(consumer, 'stop').mockResolvedValue(undefined);
+
+            // Emit SIGINT — this executes the () => this.stop() arrow function
+            process.emit('SIGINT');
+
+            expect(stopSpy).toHaveBeenCalled();
+            stopSpy.mockRestore();
+        });
+    });
+});
+
+describe('ResilientConsumer - Metrics', () => {
+    let mockChannel: any;
+    let mockConnection: any;
+
+    beforeAll(() => {
+        process.setMaxListeners(50);
+    });
+
+    beforeEach(() => {
+        mockChannel = {
+            assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+            assertExchange: jest.fn().mockResolvedValue({}),
+            bindQueue: jest.fn().mockResolvedValue({}),
+            consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+            checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 }),
+            prefetch: jest.fn(),
+            cancel: jest.fn().mockResolvedValue(undefined),
+            close: jest.fn().mockResolvedValue(undefined),
+        };
+        mockConnection = {
+            on: jest.fn(),
+            close: jest.fn().mockResolvedValue(undefined),
+            connection: { stream: { writable: true } },
+        };
+    });
+
+    const buildMockQueue = (consumeCallback?: { ref: any }) => {
+        const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+        AmqpQueue.mockImplementation(() => ({
+            connect: jest.fn().mockResolvedValue(undefined),
+            consume: jest.fn().mockImplementation(async (_queue: string, cb: any) => {
+                if (consumeCallback) consumeCallback.ref = cb;
+            }),
+            disconnect: jest.fn().mockResolvedValue(undefined),
+            cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+            waitForProcessing: jest.fn().mockResolvedValue(undefined),
+            channel: mockChannel,
+            connection: mockConnection,
+            closed: false,
+            publish: jest.fn().mockResolvedValue(undefined),
+        }));
+    };
+
+    it('should return undefined from getMetrics() when metricsEnabled is false', () => {
+        const consumer = new ResilientConsumer({
+            connection: 'amqp://localhost',
+            consumeQueue: { queue: 'q' },
+            eventsToProcess: [{ type: 'x', handler: jest.fn() }],
+        });
+        expect(consumer.getMetrics()).toBeUndefined();
+    });
+
+    it('should return a snapshot from getMetrics() when metricsEnabled is true', () => {
+        const consumer = new ResilientConsumer({
+            connection: 'amqp://localhost',
+            consumeQueue: { queue: 'q' },
+            eventsToProcess: [{ type: 'x', handler: jest.fn() }],
+            metricsEnabled: true,
+        });
+        const snap = consumer.getMetrics();
+        expect(snap).toBeDefined();
+        expect(snap!.messagesReceived).toBe(0);
+    });
+
+    it('should increment messagesReceived and messagesProcessed on successful processing', async () => {
+        const cbRef = { ref: undefined as any };
+        buildMockQueue(cbRef);
+
+        const handler = jest.fn().mockResolvedValue(undefined);
+        const consumer = new ResilientConsumer({
+            connection: 'amqp://localhost',
+            consumeQueue: { queue: 'q' },
+            eventsToProcess: [{ type: 'test.event', handler }],
+            metricsEnabled: true,
+        });
+
+        await consumer.start();
+
+        const event: EventMessage = { messageId: 'id-1', type: 'test.event', payload: {}, properties: {} };
+        await cbRef.ref(event);
+
+        const snap = consumer.getMetrics()!;
+        expect(snap.messagesReceived).toBe(1);
+        expect(snap.messagesProcessed).toBe(1);
+        expect(snap.processingErrors).toBe(0);
+        expect(snap.avgProcessingTimeMs).toBeGreaterThanOrEqual(0);
+
+        await consumer.stop();
+    });
+
+    it('should increment processingErrors when the consume callback itself throws', async () => {
+        const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+        let consumeCallback: any;
+        AmqpQueue.mockImplementation(() => ({
+            connect: jest.fn().mockResolvedValue(undefined),
+            consume: jest.fn().mockImplementation(async (_queue: string, cb: any) => {
+                consumeCallback = cb;
+            }),
+            disconnect: jest.fn().mockResolvedValue(undefined),
+            cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+            waitForProcessing: jest.fn().mockResolvedValue(undefined),
+            channel: mockChannel,
+            connection: mockConnection,
+            closed: false,
+            publish: jest.fn().mockResolvedValue(undefined),
+        }));
+
+        const consumer = new ResilientConsumer({
+            connection: 'amqp://localhost',
+            consumeQueue: { queue: 'q' },
+            eventsToProcess: [{ type: 'test.event', handler: jest.fn() }],
+            metricsEnabled: true,
+        });
+
+        await consumer.start();
+
+        // Patch the processor to throw directly, bypassing its internal error handling
+        (consumer as any).processor = {
+            process: jest.fn().mockRejectedValue(new Error('processor boom')),
+        };
+
+        const event: EventMessage = { messageId: 'id-2', type: 'test.event', payload: {}, properties: {} };
+        try { await consumeCallback(event); } catch { /* expected */ }
+
+        const snap = consumer.getMetrics()!;
+        expect(snap.messagesReceived).toBe(1);
+        expect(snap.processingErrors).toBe(1);
+
+        await consumer.stop();
     });
 });
