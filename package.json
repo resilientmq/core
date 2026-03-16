@@ -1,6 +1,6 @@
 {
   "name": "@resilientmq/core",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "description": "Core logic for resilient RabbitMQ event processing",
@@ -53,5 +53,8 @@
   },
   "dependencies": {
     "amqplib": "^0.10.9"
+  },
+  "overrides": {
+    "undici": "^7.24.3"
   }
 }

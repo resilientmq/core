@@ -2,6 +2,7 @@ import { applyMiddleware } from './middleware';
 import { log } from '../logger/logger';
 import { EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig } from '../types';
 
+
 /**
  * Handles the lifecycle of consuming events: deduplication, retries, and DLQ routing.
  *

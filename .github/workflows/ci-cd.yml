@@ -1,0 +1,461 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main, master, develop]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - '.github/workflows/**'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ─── Unit Tests ──────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node-version: [18, 20, 22, 24, 25]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - uses: actions/cache@v4
+        with:
+          path: .jest-cache/unit
+          key: jest-unit-${{ runner.os }}-node${{ matrix.node-version }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: jest-unit-${{ runner.os }}-node${{ matrix.node-version }}-
+
+      - run: npm ci
+
+      - name: Run unit tests with coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage (Node 20 only)
+        uses: actions/upload-artifact@v4
+        if: always() && matrix.node-version == 20
+        with:
+          name: coverage-report
+          path: coverage/unit/coverage-summary.json
+          retention-days: 30
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-results-node${{ matrix.node-version }}
+          path: test-results/junit-unit.xml
+          retention-days: 14
+
+  # ─── Integration Tests ───────────────────────────────────────────────────────
+  integration-tests:
+    name: Integration Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: unit-tests
+    strategy:
+      matrix:
+        node-version: [18, 20, 22, 24, 25]
+      fail-fast: false
+
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management-alpine
+        ports:
+          - 5672:5672
+          - 15672:15672
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        options: >-
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 60s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - uses: actions/cache@v4
+        with:
+          path: .jest-cache/integration
+          key: jest-integration-${{ runner.os }}-node${{ matrix.node-version }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: jest-integration-${{ runner.os }}-node${{ matrix.node-version }}-
+
+      - run: npm ci
+
+      - name: Wait for RabbitMQ
+        run: |
+          for i in $(seq 1 30); do
+            if curl -u guest:guest -fs http://localhost:15672/api/overview > /dev/null 2>&1; then
+              echo "✅ RabbitMQ ready"; exit 0
+            fi
+            [ $((i % 5)) -eq 0 ] && echo "  attempt $i/30..."
+            sleep 2
+          done
+          echo "❌ RabbitMQ not ready after 60s"; exit 1
+
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-results-node${{ matrix.node-version }}
+          path: test-results/junit-integration.xml
+          retention-days: 14
+
+  # ─── Stress Tests ────────────────────────────────────────────────────────────
+  stress-tests:
+    name: Stress Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: integration-tests
+
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management-alpine
+        ports:
+          - 5672:5672
+          - 15672:15672
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        options: >-
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 60s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Wait for RabbitMQ
+        run: |
+          for i in $(seq 1 30); do
+            if curl -u guest:guest -fs http://localhost:15672/api/overview > /dev/null 2>&1; then
+              echo "✅ RabbitMQ ready"; exit 0
+            fi
+            [ $((i % 5)) -eq 0 ] && echo "  attempt $i/30..."
+            sleep 2
+          done
+          echo "❌ RabbitMQ not ready"; exit 1
+
+      - name: Run stress tests
+        run: npm run test:stress
+        env:
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+
+      - name: Validate error rate (<1%)
+        run: |
+          if ls test-results/stress-*.json 1>/dev/null 2>&1; then
+            FAILED=0
+            for file in test-results/stress-*.json; do
+              ERROR_RATE=$(node -p "const d=require('./$file'); d.errorRate||0" 2>/dev/null || echo "0")
+              echo "$(basename $file): error rate = $ERROR_RATE%"
+              if (( $(echo "$ERROR_RATE >= 1" | bc -l 2>/dev/null || echo "0") )); then
+                echo "❌ Error rate exceeds 1%"; FAILED=$((FAILED+1))
+              fi
+            done
+            [ $FAILED -eq 0 ] && echo "✅ All stress tests within threshold"
+            exit $FAILED
+          else
+            echo "⚠️ No stress metrics found"
+          fi
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stress-results
+          path: test-results/stress-*.json
+          retention-days: 30
+
+  # ─── Benchmarks ──────────────────────────────────────────────────────────────
+  benchmarks:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: integration-tests
+
+    services:
+      rabbitmq:
+        image: rabbitmq:3.12-management-alpine
+        ports:
+          - 5672:5672
+          - 15672:15672
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        options: >-
+          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 60s
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Wait for RabbitMQ
+        run: |
+          for i in $(seq 1 30); do
+            if curl -u guest:guest -fs http://localhost:15672/api/overview > /dev/null 2>&1; then
+              echo "✅ RabbitMQ ready"; exit 0
+            fi
+            [ $((i % 5)) -eq 0 ] && echo "  attempt $i/30..."
+            sleep 2
+          done
+          echo "❌ RabbitMQ not ready"; exit 1
+
+      - name: Run benchmarks
+        run: npm run test:benchmark
+        env:
+          RABBITMQ_URL: amqp://guest:guest@localhost:5672
+
+      - name: Check for regressions
+        run: |
+          if [ -f "test/scripts/compare-benchmarks.js" ]; then
+            node test/scripts/compare-benchmarks.js || echo "⚠️ Regression detected (non-blocking)"
+          fi
+
+      - name: Validate thresholds (≥100 msg/s, ≤1000ms latency)
+        run: |
+          if ls test-results/benchmark-*.json 1>/dev/null 2>&1; then
+            FAILED=0
+            for file in test-results/benchmark-*.json; do
+              NAME=$(basename "$file" .json)
+              THROUGHPUT=$(node -p "const d=require('./$file'); d.throughput||d.publishThroughput||d.consumeThroughput||0" 2>/dev/null || echo "0")
+              LATENCY=$(node -p "const d=require('./$file'); d.avgLatency||d.latency?.avg||0" 2>/dev/null || echo "0")
+              echo "$NAME: $THROUGHPUT msg/s, ${LATENCY}ms avg latency"
+              if [ "$THROUGHPUT" != "0" ] && [ "$THROUGHPUT" != "NaN" ]; then
+                if (( $(echo "$THROUGHPUT < 100" | bc -l 2>/dev/null || echo "0") )); then
+                  echo "  ❌ Throughput below 100 msg/s"; FAILED=$((FAILED+1))
+                fi
+              fi
+              if [ "$LATENCY" != "0" ] && [ "$LATENCY" != "NaN" ]; then
+                if (( $(echo "$LATENCY > 1000" | bc -l 2>/dev/null || echo "0") )); then
+                  echo "  ❌ Latency exceeds 1000ms"; FAILED=$((FAILED+1))
+                fi
+              fi
+            done
+            [ $FAILED -eq 0 ] && echo "✅ All benchmarks within thresholds"
+            exit $FAILED
+          else
+            echo "⚠️ No benchmark results found"
+          fi
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: test-results/benchmark-*.json
+          retention-days: 90
+
+  # ─── Build ───────────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [stress-tests, benchmarks]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Verify dist/
+        run: |
+          echo "Main: $(node -p 'require("./package.json").main')"
+          echo "Types: $(node -p 'require("./package.json").types')"
+          ls -la dist/
+          echo "✅ Build OK"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            dist/
+            package.json
+            package-lock.json
+            README.md
+          retention-days: 7
+
+  # ─── Publish ─────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish to NPM
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org/'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Get package info
+        id: pkg
+        run: |
+          VERSION=$(node -p 'require("./package.json").version')
+          NAME=$(node -p 'require("./package.json").name')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "📦 $NAME@$VERSION"
+
+      - name: Check if version already published
+        id: version-check
+        run: |
+          PUBLISHED=$(npm view ${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }} version 2>/dev/null || echo "")
+          if [ "$PUBLISHED" = "${{ steps.pkg.outputs.version }}" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Version ${{ steps.pkg.outputs.version }} already on npm — skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "✅ New version ${{ steps.pkg.outputs.version }}"
+          fi
+
+      - name: Create git tag
+        if: steps.version-check.outputs.exists == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="v${{ steps.pkg.outputs.version }}"
+          git fetch --tags --force
+          if git rev-parse "$TAG" >/dev/null 2>&1 || git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
+            echo "⚠️ Tag $TAG already exists"
+          else
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+            echo "✅ Tag $TAG created"
+          fi
+
+      - name: Publish to NPM
+        if: steps.version-check.outputs.exists == 'false'
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ─── Summary ─────────────────────────────────────────────────────────────────
+  summary:
+    name: CI/CD Summary
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, stress-tests, benchmarks, build, publish]
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report/
+        continue-on-error: true
+
+      - name: Write summary
+        run: |
+          {
+            echo "# CI/CD Summary"
+            echo ""
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+            echo "| Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |"
+            echo "| Integration Tests | ${{ needs.integration-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |"
+            echo "| Stress Tests | ${{ needs.stress-tests.result == 'success' && '✅ Passed' || needs.stress-tests.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            echo "| Benchmarks | ${{ needs.benchmarks.result == 'success' && '✅ Passed' || needs.benchmarks.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            echo "| Build | ${{ needs.build.result == 'success' && '✅ Passed' || needs.build.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            echo "| Publish | ${{ needs.publish.result == 'success' && '✅ Published' || needs.publish.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |"
+            echo ""
+
+            SUMMARY="coverage-report/coverage-summary.json"
+            if [ -f "$SUMMARY" ]; then
+              LINES=$(node -e "try{const d=require('./$SUMMARY');process.stdout.write(String(d.total.lines.pct))}catch(e){process.stdout.write('N/A')}")
+              BRANCHES=$(node -e "try{const d=require('./$SUMMARY');process.stdout.write(String(d.total.branches.pct))}catch(e){process.stdout.write('N/A')}")
+              FUNCTIONS=$(node -e "try{const d=require('./$SUMMARY');process.stdout.write(String(d.total.functions.pct))}catch(e){process.stdout.write('N/A')}")
+              STATEMENTS=$(node -e "try{const d=require('./$SUMMARY');process.stdout.write(String(d.total.statements.pct))}catch(e){process.stdout.write('N/A')}")
+              echo "## Coverage"
+              echo ""
+              echo "| Metric | % |"
+              echo "|--------|---|"
+              echo "| Statements | ${STATEMENTS}% |"
+              echo "| Branches | ${BRANCHES}% |"
+              echo "| Functions | ${FUNCTIONS}% |"
+              echo "| Lines | ${LINES}% |"
+            fi
+
+            echo ""
+            echo "**Branch:** \`${{ github.ref_name }}\`  "
+            echo "**Commit:** \`${{ github.sha }}\`  "
+            echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          } >> $GITHUB_STEP_SUMMARY
