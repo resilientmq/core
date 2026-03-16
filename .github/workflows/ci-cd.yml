@@ -74,7 +74,6 @@ jobs:
     name: Integration Tests (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: unit-tests
     strategy:
       matrix:
         node-version: [18, 20, 22, 24, 25]
@@ -141,7 +140,7 @@ jobs:
     name: Stress Tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: integration-tests
+    needs: [unit-tests, integration-tests]
 
     services:
       rabbitmq:
@@ -164,7 +163,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
       - run: npm ci
@@ -215,7 +214,7 @@ jobs:
     name: Performance Benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: integration-tests
+    needs: [unit-tests, integration-tests]
 
     services:
       rabbitmq:
@@ -240,7 +239,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
       - run: npm ci
@@ -312,7 +311,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
       - run: npm ci
@@ -352,7 +351,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
           registry-url: 'https://registry.npmjs.org/'
           cache: 'npm'
 
@@ -414,7 +413,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Download coverage
         uses: actions/download-artifact@v4
@@ -459,3 +458,4 @@ jobs:
             echo "**Commit:** \`${{ github.sha }}\`  "
             echo "**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           } >> $GITHUB_STEP_SUMMARY
+

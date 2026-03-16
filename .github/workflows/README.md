@@ -1,37 +1,45 @@
 # GitHub Actions Workflows
 
-## ci.yml — Continuous Integration
+## ci-cd.yml — CI/CD Pipeline
 
-Runs on every push/PR to `main`, `master`, `develop`.
+Runs on push/PR to `main`, `master`, `develop` (when `src/`, `test/`, `package.json`, `tsconfig.json`, or workflow files change).
+
+### Job order
+
+```
+unit-tests ──┐
+             ├──► integration-tests ──┬──► stress-tests ──┐
+             │                        └──► benchmarks   ──┴──► build ──┬──► publish
+             │                                                          └──► summary
+```
 
 | Job | Description | Node versions |
 |-----|-------------|---------------|
-| `unit-tests` | Unit tests + coverage (≥70% lines) | 18, 20, 22, 24 |
-| `integration-tests` | Integration tests against RabbitMQ | 18, 20, 22, 24 |
+| `unit-tests` | Unit tests + coverage | 18, 20, 22, 24, 25 |
+| `integration-tests` | Integration tests against RabbitMQ | 18, 20, 22, 24, 25 |
+| `stress-tests` | High-volume tests (error rate < 1%) | 20 |
+| `benchmarks` | Performance benchmarks (≥100 msg/s, ≤1000ms latency) | 20 |
 | `build` | TypeScript compilation + dist verification | 20 |
-| `summary` | Coverage table in GitHub Step Summary | 20 |
+| `publish` | Publish to npm + create git tag | 20 |
+| `summary` | Coverage table + pipeline status in GitHub Step Summary | 20 |
 
-Coverage report is uploaded as artifact `coverage-report` from Node 20 run.
+### Publish conditions
 
-## stress-benchmarks.yml — Stress & Benchmarks
+`publish` runs only on push to `main`/`master` and skips if the version in `package.json` is already on npm.
 
-Runs on push to `main`/`master` (src or test changes) and on manual dispatch.
-
-| Job | Description | Threshold |
-|-----|-------------|-----------|
-| `stress-tests` | High-volume tests | Error rate < 1% |
-| `benchmarks` | Performance benchmarks | ≥100 msg/s, ≤1000ms latency |
-
-## publish.yml — NPM Publish
-
-Runs on push to `master` when `src/` or `package.json` changes.
-
-- Skips if version already exists on npm
-- Creates a git tag `vX.Y.Z`
-- Publishes to npm (requires `NPM_TOKEN` secret)
-
-## Required Secrets
+### Required secrets
 
 | Secret | Used by |
 |--------|---------|
-| `NPM_TOKEN` | `publish.yml` |
+| `NPM_TOKEN` | `publish` job |
+
+### Artifacts
+
+| Artifact | Produced by | Retention |
+|----------|-------------|-----------|
+| `coverage-report` | `unit-tests` (Node 20) | 30 days |
+| `unit-results-nodeXX` | `unit-tests` | 14 days |
+| `integration-results-nodeXX` | `integration-tests` | 14 days |
+| `stress-results` | `stress-tests` | 30 days |
+| `benchmark-results` | `benchmarks` | 90 days |
+| `build-artifacts` | `build` | 7 days |
