@@ -31,11 +31,20 @@ export class ResilientEventPublisher {
         }
 
         if (this.config.store) {
-            void this.checkStoreConnection().catch(error => {
+            try {
+                const connectionCheck = this.checkStoreConnection();
+                connectionCheck.catch(error => {
+                    this.storeConnected = false;
+                    this.metrics?.increment('processingErrors');
+                    log('error', '[Publisher] Failed to connect to store during initialization', error);
+                    this.handleStoreInitFailure();
+                });
+            } catch (error) {
                 this.storeConnected = false;
                 this.metrics?.increment('processingErrors');
                 log('error', '[Publisher] Failed to connect to store during initialization', error);
-            });
+                this.handleStoreInitFailure();
+            }
         }
 
         if (!this.instantPublish && this.config.pendingEventsCheckIntervalMs && this.config.pendingEventsCheckIntervalMs > 0) {
@@ -183,20 +192,17 @@ export class ResilientEventPublisher {
     }
 
     public async disconnect(): Promise<void> {
+        if (!this.connected) {
+            return;
+        }
+
         if (this.idleTimer) {
             clearTimeout(this.idleTimer);
             this.idleTimer = undefined;
         }
 
-        if (!this.connected && this.queue.closed) {
-            return;
-        }
-
-        try {
-            await this.queue.disconnect();
-        } finally {
-            this.connected = false;
-        }
+        await this.queue.disconnect();
+        this.connected = false;
     }
 
     public stopPendingEventsCheck(): void {
@@ -236,6 +242,7 @@ export class ResilientEventPublisher {
 
     private startIdleMonitoring(): void {
         const idleTimeout = this.config.idleTimeoutMs ?? 10000;
+
         if (idleTimeout <= 0) {
             return;
         }
@@ -274,9 +281,9 @@ export class ResilientEventPublisher {
                 return;
             }
 
-            void this.processPendingEvents().catch(error => {
-                log('error', '[Publisher] Error during periodic pending events check', error);
-            });
+            this.processPendingEvents().catch(error =>
+                log('error', '[Publisher] Error during periodic pending events check', error)
+            );
         }, this.config.pendingEventsCheckIntervalMs);
     }
 
@@ -376,5 +383,9 @@ export class ResilientEventPublisher {
         if (!this.config.queue && !this.config.exchange) {
             throw new Error('[Publisher] Configuration error: either "queue" or "exchange" must be configured');
         }
+    }
+
+    private handleStoreInitFailure(): void {
+        throw new Error('Failed to initialize publisher: store connection failed');
     }
 }
