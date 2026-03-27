@@ -222,6 +222,12 @@ export type ResilientEventHooks = {
     onError?: (event: EventMessage, error: Error) => void;
 };
 
+export interface ProcessPendingEventsOptions {
+    batchSize?: number;
+    maxPublishesPerSecond?: number;
+    maxConcurrentPublishes?: number;
+}
+
 /**
  * Configuration for resilient event publishing.
  */
@@ -290,4 +296,8 @@ export type ResilientPublisherConfig = {
      * @default false
      */
     metricsEnabled?: boolean;
+    maxConcurrentPublishes?: number;
+    pendingEventsBatchSize?: number;
+    pendingEventsMaxPublishesPerSecond?: number;
+    pendingEventsMaxConcurrentPublishes?: number;
 };

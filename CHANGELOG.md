@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-03-27
+
+### Added
+
+- **Publisher (`processPendingEvents`)**: Added per-call throughput controls via `ProcessPendingEventsOptions`
+  - `batchSize?: number`
+  - `maxPublishesPerSecond?: number`
+  - `maxConcurrentPublishes?: number`
+
+- **Publisher Config**: Added optional defaults for pending events processing
+  - `maxConcurrentPublishes`
+  - `pendingEventsBatchSize`
+  - `pendingEventsMaxPublishesPerSecond`
+  - `pendingEventsMaxConcurrentPublishes`
+
+### Changed
+
+- **Publisher (`processPendingEvents`)**: Pending events processing is now configurable and throughput-oriented
+  - Fetch size is no longer fixed at 10 events
+  - Pending events can now be dispatched with bounded parallelism
+  - Dispatch rate can now be limited by publishes-per-second to avoid overwhelming RabbitMQ channels
+  - Constructor-level defaults can be overridden per `processPendingEvents()` call
+
+- **Publisher (`processPendingEvents`)**: Pending events are still fetched and scheduled oldest-first within each batch, while allowing higher throughput for large backlogs
+
+### Fixed
+
+- **Publisher (broker recovery under load)**: Coordinated concurrent reconnect attempts through a shared recovery flow, preventing reconnect storms and reducing cascading `Channel closed` / `Channel ended` failures during high-throughput pending processing
+
+- **Publisher (high-throughput idle handling)**: Preserved idle-disconnect lifecycle while processing pending events at higher rates
+
 ## [2.0.1] - 2026-03-16
 
 ### Fixed

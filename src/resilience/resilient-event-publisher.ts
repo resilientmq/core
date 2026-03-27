@@ -1,6 +1,11 @@
 import { AmqpQueue } from '../broker/amqp-queue';
 import { log } from '../logger/logger';
-import { EventMessage, EventPublishStatus, ResilientPublisherConfig } from '../types';
+import {
+    EventMessage,
+    EventPublishStatus,
+    ProcessPendingEventsOptions,
+    ResilientPublisherConfig
+} from '../types';
 import { MetricsCollector, ResilientMQMetrics } from '../metrics/metrics-collector';
 
 export class ResilientEventPublisher {
@@ -8,13 +13,14 @@ export class ResilientEventPublisher {
     private pendingEventsInterval?: NodeJS.Timeout;
     private idleTimer?: NodeJS.Timeout;
     private connectPromise?: Promise<void>;
+    private reconnectPromise?: Promise<void>;
     private readonly instantPublish: boolean;
     private storeConnected = false;
     private connected = false;
     private lastPublishTime = 0;
     private pendingOperations = 0;
     private isProcessingPending = false;
-    private readonly maxConcurrentPublishes = 100;
+    private readonly maxConcurrentPublishes: number;
     private readonly metrics?: MetricsCollector;
 
     public getMetrics(): ResilientMQMetrics | undefined {
@@ -22,6 +28,7 @@ export class ResilientEventPublisher {
     }
 
     constructor(private readonly config: ResilientPublisherConfig) {
+        this.maxConcurrentPublishes = config.maxConcurrentPublishes ?? 100;
         this.validateConfig();
         this.instantPublish = config.instantPublish !== false;
         this.queue = new AmqpQueue(this.config.connection);
@@ -54,7 +61,7 @@ export class ResilientEventPublisher {
 
     async publish(event: EventMessage, options?: { storeOnly?: boolean }): Promise<void> {
         while (this.pendingOperations >= this.maxConcurrentPublishes) {
-            await new Promise(resolve => setTimeout(resolve, 10));
+            await this.sleep(10);
         }
 
         this.pendingOperations++;
@@ -108,7 +115,7 @@ export class ResilientEventPublisher {
         }
     }
 
-    async processPendingEvents(): Promise<void> {
+    async processPendingEvents(options: ProcessPendingEventsOptions = {}): Promise<void> {
         if (!this.config.store) {
             log('warn', '[Publisher] Cannot process pending events: no store configured');
             return;
@@ -123,6 +130,12 @@ export class ResilientEventPublisher {
             return;
         }
 
+        const {
+            batchSize,
+            maxPublishesPerSecond,
+            maxConcurrentPublishes
+        } = this.resolvePendingProcessingOptions(options);
+
         this.isProcessingPending = true;
         this.pendingOperations++;
 
@@ -134,7 +147,6 @@ export class ResilientEventPublisher {
             await this.connect();
             this.resetIdleTimer();
 
-            const BATCH_SIZE = 10;
             let totalSuccess = 0;
             let totalErrors = 0;
             let batchNumber = 0;
@@ -142,39 +154,62 @@ export class ResilientEventPublisher {
             while (true) {
                 batchNumber++;
 
-                const rawResult = await this.config.store.getPendingEvents(EventPublishStatus.PENDING, BATCH_SIZE);
-                const pendingEvents: EventMessage[] = Array.isArray(rawResult) ? rawResult : Array.from(rawResult as Iterable<EventMessage>);
+                const rawResult = await this.config.store.getPendingEvents(EventPublishStatus.PENDING, batchSize);
+                const pendingEvents: EventMessage[] = Array.isArray(rawResult)
+                    ? rawResult
+                    : Array.from(rawResult as Iterable<EventMessage>);
 
                 if (!pendingEvents.length) {
                     break;
                 }
 
-                const sorted = pendingEvents.sort((a, b) => (a.properties?.timestamp || 0) - (b.properties?.timestamp || 0));
+                const sorted = pendingEvents.sort(
+                    (a, b) => (a.properties?.timestamp || 0) - (b.properties?.timestamp || 0)
+                );
 
-                for (const event of sorted) {
-                    try {
-                        await this.publishToBroker(event);
-                        await this.config.store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
-                        totalSuccess++;
-                        this.metrics?.increment('messagesPublished');
-                    } catch (error) {
-                        totalErrors++;
-                        this.metrics?.increment('processingErrors');
-                        log('error', `[Publisher] Failed to publish pending event ${event.messageId}`, error);
+                let index = 0;
 
+                while (index < sorted.length) {
+                    const windowStart = Date.now();
+                    const windowEvents = sorted.slice(index, index + maxPublishesPerSecond);
+
+                    await this.runWithConcurrency(windowEvents, maxConcurrentPublishes, async event => {
                         try {
-                            await this.config.store.updateEventStatus(event, EventPublishStatus.ERROR);
-                        } catch {}
+                            await this.publishToBroker(event);
+                            await this.config.store!.updateEventStatus(event, EventPublishStatus.PUBLISHED);
+                            totalSuccess++;
+                            this.metrics?.increment('messagesPublished');
+                        } catch (error) {
+                            totalErrors++;
+                            this.metrics?.increment('processingErrors');
+                            log('error', `[Publisher] Failed to publish pending event ${event.messageId}`, error);
+
+                            try {
+                                await this.config.store!.updateEventStatus(event, EventPublishStatus.ERROR);
+                            } catch {}
+                        }
+                    });
+
+                    index += windowEvents.length;
+
+                    if (index < sorted.length) {
+                        const elapsed = Date.now() - windowStart;
+                        if (elapsed < 1000) {
+                            await this.sleep(1000 - elapsed);
+                        }
                     }
                 }
 
-                if (pendingEvents.length < BATCH_SIZE) {
+                if (pendingEvents.length < batchSize) {
                     break;
                 }
             }
 
             if (totalSuccess > 0 || totalErrors > 0) {
-                log('info', `[Publisher] Pending events done. Batches: ${batchNumber}, Success: ${totalSuccess}, Errors: ${totalErrors}`);
+                log(
+                    'info',
+                    `[Publisher] Pending events done. Batches: ${batchNumber}, Success: ${totalSuccess}, Errors: ${totalErrors}, Rate: ${maxPublishesPerSecond}/s, Concurrency: ${maxConcurrentPublishes}`
+                );
             }
         } catch (error) {
             this.metrics?.increment('processingErrors');
@@ -301,6 +336,19 @@ export class ResilientEventPublisher {
                 throw error;
             }
 
+            await this.recoverBrokerConnection();
+            await this.queue.publish(destination, event, { exchange: this.config.exchange });
+            this.resetIdleTimer();
+        }
+    }
+
+    private async recoverBrokerConnection(): Promise<void> {
+        if (this.reconnectPromise) {
+            await this.reconnectPromise;
+            return;
+        }
+
+        this.reconnectPromise = (async () => {
             this.connected = false;
 
             try {
@@ -309,8 +357,12 @@ export class ResilientEventPublisher {
 
             await this.connect();
             this.resetIdleTimer();
-            await this.queue.publish(destination, event, { exchange: this.config.exchange });
-            this.resetIdleTimer();
+        })();
+
+        try {
+            await this.reconnectPromise;
+        } finally {
+            this.reconnectPromise = undefined;
         }
     }
 
@@ -360,13 +412,33 @@ export class ResilientEventPublisher {
                     throw new Error(`Failed to connect to store after ${maxRetries} attempts`);
                 }
 
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                await this.sleep(retryDelay);
             }
         }
     }
 
     private validateConfig(): void {
         const instantPublish = this.config.instantPublish !== false;
+
+        this.assertPositiveInteger('maxConcurrentPublishes', this.maxConcurrentPublishes);
+
+        if (this.config.pendingEventsBatchSize !== undefined) {
+            this.assertPositiveInteger('pendingEventsBatchSize', this.config.pendingEventsBatchSize);
+        }
+
+        if (this.config.pendingEventsMaxPublishesPerSecond !== undefined) {
+            this.assertPositiveInteger(
+                'pendingEventsMaxPublishesPerSecond',
+                this.config.pendingEventsMaxPublishesPerSecond
+            );
+        }
+
+        if (this.config.pendingEventsMaxConcurrentPublishes !== undefined) {
+            this.assertPositiveInteger(
+                'pendingEventsMaxConcurrentPublishes',
+                this.config.pendingEventsMaxConcurrentPublishes
+            );
+        }
 
         if (!instantPublish && !this.config.store) {
             throw new Error('[Publisher] Configuration error: "store" is REQUIRED when "instantPublish" is set to false');
@@ -387,5 +459,63 @@ export class ResilientEventPublisher {
 
     private handleStoreInitFailure(): void {
         throw new Error('Failed to initialize publisher: store connection failed');
+    }
+
+    private resolvePendingProcessingOptions(options: ProcessPendingEventsOptions) {
+        const requestedBatchSize = options.batchSize ?? this.config.pendingEventsBatchSize ?? 100;
+        const maxPublishesPerSecond =
+            options.maxPublishesPerSecond ??
+            this.config.pendingEventsMaxPublishesPerSecond ??
+            requestedBatchSize;
+        const requestedMaxConcurrentPublishes =
+            options.maxConcurrentPublishes ??
+            this.config.pendingEventsMaxConcurrentPublishes ??
+            Math.min(10, maxPublishesPerSecond);
+
+        this.assertPositiveInteger('batchSize', requestedBatchSize);
+        this.assertPositiveInteger('maxPublishesPerSecond', maxPublishesPerSecond);
+        this.assertPositiveInteger('maxConcurrentPublishes', requestedMaxConcurrentPublishes);
+
+        return {
+            batchSize: Math.max(requestedBatchSize, maxPublishesPerSecond),
+            maxPublishesPerSecond,
+            maxConcurrentPublishes: Math.min(requestedMaxConcurrentPublishes, maxPublishesPerSecond)
+        };
+    }
+
+    private async runWithConcurrency<T>(
+        items: T[],
+        concurrency: number,
+        handler: (item: T) => Promise<void>
+    ): Promise<void> {
+        if (!items.length) {
+            return;
+        }
+
+        const workerCount = Math.min(concurrency, items.length);
+        let currentIndex = 0;
+
+        await Promise.all(
+            Array.from({ length: workerCount }, async () => {
+                while (true) {
+                    const index = currentIndex++;
+                    if (index >= items.length) {
+                        return;
+                    }
+
+                    await handler(items[index]);
+                }
+            })
+        );
+    }
+
+    private assertPositiveInteger(name: string, value: number): void {
+        if (!Number.isInteger(value) || value <= 0) {
+            throw new Error(`[Publisher] Configuration error: "${name}" must be a positive integer`);
+        }
+    }
+
+    private async sleep(ms: number): Promise<void> {
+        await new Promise(resolve => setTimeout(resolve, ms));
     }
 }

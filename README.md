@@ -99,8 +99,13 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `store` | `EventStore` | ❌* | Event metadata persistence (optional unless `instantPublish` is false) |
 | `instantPublish` | `boolean` | ❌ | If true (default), publishes immediately. If false, stores for later delivery |
 | `pendingEventsCheckIntervalMs` | `number` | ❌ | Interval to check and send pending events (ms). Only effective when `instantPublish` is false |
+| `maxConcurrentPublishes` | `number` | ❌ | Global backpressure limit for concurrent publish operations (default: `100`) |
+| `pendingEventsBatchSize` | `number` | ❌ | Default number of pending events fetched per batch when calling `processPendingEvents()` |
+| `pendingEventsMaxPublishesPerSecond` | `number` | ❌ | Default max number of pending events dispatched per second during `processPendingEvents()` |
+| `pendingEventsMaxConcurrentPublishes` | `number` | ❌ | Default max number of pending events published in parallel during `processPendingEvents()` |
 | `storeConnectionRetries` | `number` | ❌ | Max retry attempts for store connection (default: 3) |
 | `storeConnectionRetryDelayMs` | `number` | ❌ | Delay between store retry attempts in ms (default: 1000) |
+| `metricsEnabled` | `boolean` | ❌ | Enable runtime metrics collection for the publisher |
 
 **Note**: When `instantPublish` is set to `false`, a `store` with `getPendingEvents()` method is **REQUIRED**.
 
@@ -294,17 +299,29 @@ publisher.stopPendingEventsCheck();
 - Events are automatically sorted and sent in chronological order (oldest first)
 - Only connects to RabbitMQ when there are actually pending events to process
 
-### ⚡ Batched Pending Events Processing (v1.2.8+)
+### ⚡ Configurable Pending Events Throughput (v2.1.0+)
 
-`processPendingEvents()` processes events in **batches of 10** to avoid memory issues when there are thousands of pending events. The method:
+`processPendingEvents()` now supports **batched retrieval**, **bounded parallelism**, and **per-second rate limiting** so you can drain large backlogs faster without overwhelming RabbitMQ channels.
 
-1. Calls `store.getPendingEvents(PENDING, 10)` to fetch up to 10 events
-2. Sorts and publishes each event in the batch
-3. Repeats until `getPendingEvents` returns an empty array or fewer than 10 events
+The method can be tuned in two ways:
 
-This prevents **heap allocation failures** (`JavaScript heap out of memory`) that can occur when loading all pending events into memory at once.
+1. **Globally in the publisher config**
+   - `pendingEventsBatchSize`
+   - `pendingEventsMaxPublishesPerSecond`
+   - `pendingEventsMaxConcurrentPublishes`
 
-> **⚠️ Important:** Your `EventStore.getPendingEvents()` implementation should respect the optional `limit` parameter and apply it at the database query level (e.g., `LIMIT 10` in SQL or `.limit(10)` in MongoDB). If the `limit` is not applied at the query level, all events will still be loaded into memory, defeating the purpose of batching.
+2. **Per invocation**
+   - `publisher.processPendingEvents({ batchSize, maxPublishesPerSecond, maxConcurrentPublishes })`
+
+#### Example: per-run override
+
+```ts
+await publisher.processPendingEvents({
+  batchSize: 500,
+  maxPublishesPerSecond: 300,
+  maxConcurrentPublishes: 12
+});
+```
 
 #### Example: Implementing `getPendingEvents` with limit
 
