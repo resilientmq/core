@@ -1,3 +1,27 @@
+# 🆕 Ignoring events with controlled errors
+
+You can throw the `IgnoredEventError` from an event handler to indicate that the event should be ignored and marked as successfully processed, even if the normal logic was not executed. This is useful for cases where certain events should not be retried or sent to the DLQ.
+
+```ts
+import { IgnoredEventError } from '@resilientmq/core/dist/resilience';
+
+const consumer = new ResilientConsumer({
+  // ...configuration
+  eventsToProcess: [
+    {
+      type: 'user.created',
+      handler: async (event) => {
+        if (event.payload.ignore) {
+          throw new IgnoredEventError('Event ignored by business rule');
+        }
+        // normal logic...
+      }
+    }
+  ]
+});
+```
+
+When this error is thrown, the event is marked as `DONE` and will not be retried or sent to the DLQ.
 # @resilientmq/core
 
 [![CI/CD Pipeline](https://github.com/resilientmq/core/actions/workflows/ci-cd.yml/badge.svg?branch=master)](https://github.com/resilientmq/core/actions/workflows/ci-cd.yml)

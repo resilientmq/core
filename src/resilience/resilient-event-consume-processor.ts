@@ -1,4 +1,5 @@
 import { applyMiddleware } from './middleware';
+import { IgnoredEventError } from './ignored-event-error';
 import { log } from '../logger/logger';
 import { EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig } from '../types';
 
@@ -74,6 +75,14 @@ export class ResilientEventConsumeProcessor {
             log('info', `[Processor] Successfully processed ${event.messageId}`);
 
         } catch (err) {
+            if (err instanceof IgnoredEventError) {
+                log('warn', `[Processor] Evento ${event.messageId} ignorado: ${err.message}`);
+                if (this.config.store) {
+                    await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
+                }
+                this.config.events?.onSuccess?.(event);
+                return;
+            }
             log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
 
             // Safety wrapper: failures in retry/DLQ logic must NOT propagate to avoid nack loops

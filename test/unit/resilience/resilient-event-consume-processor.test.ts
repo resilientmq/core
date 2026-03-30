@@ -1,3 +1,4 @@
+import { IgnoredEventError } from '../../../src/resilience';
 import { ResilientEventConsumeProcessor } from '../../../src/resilience/resilient-event-consume-processor';
 import { EventStoreMock } from '../../utils/event-store-mock';
 import { EventMessage, MessageQueue, Middleware, RabbitMQResilientProcessorConfig } from '../../../src/types';
@@ -49,6 +50,24 @@ describe('ResilientEventConsumeProcessor', () => {
     });
 
     describe('process', () => {
+
+                it('should mark event as DONE and not retry if IgnoredEventError is thrown', async () => {
+                    const handler = jest.fn().mockImplementation(() => {
+                        throw new IgnoredEventError('Evento ignorado por test');
+                    });
+                    config.eventsToProcess = [{ type: 'test.event', handler }];
+                    processor = new ResilientEventConsumeProcessor(config);
+
+                    await processor.process(testEvent);
+
+                    // El handler debe ser llamado
+                    expect(handler).toHaveBeenCalledWith(testEvent);
+                    // El evento debe marcarse como DONE
+                    const savedEvent = await mockStore.getEvent(testEvent);
+                    expect(savedEvent?.status).toBe(EventConsumeStatus.DONE);
+                    // No debe publicarse en retry ni DLQ
+                    expect(mockBroker.publish).not.toHaveBeenCalled();
+                });
         it('should process event with matching handler', async () => {
             const handler = jest.fn();
             config.eventsToProcess = [{ type: 'test.event', handler }];

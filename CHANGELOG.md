@@ -1,3 +1,11 @@
+# [2.2.0] - 2026-03-30
+
+### Added
+
+- **IgnoredEventError**: New error that can be thrown from an event handler to ignore the event and mark it as successfully processed (`DONE`), with no retries or DLQ.
+- **Consumer**: If a handler throws `IgnoredEventError`, the event is marked as `DONE` and will not be retried or sent to the DLQ.
+- **Tests**: Added unit test for this behavior.
+- **Docs**: Documented the usage of `IgnoredEventError` in the README.
 # Changelog
 
 All notable changes to this project will be documented in this file.
