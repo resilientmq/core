@@ -148,6 +148,23 @@ export class EventStoreMock implements EventStore {
         return matchingEvents;
     }
 
+    async batchUpdateEventStatus(
+        updates: Array<{ event: EventMessage; status: EventConsumeStatus | EventPublishStatus }>
+    ): Promise<void> {
+        this.incrementCallCount('batchUpdateEventStatus');
+
+        if (this.failOnUpdate) {
+            throw new Error('EventStore: batchUpdateEventStatus failed (simulated)');
+        }
+
+        for (const { event, status } of updates) {
+            const existingEvent = this.events.get(event.messageId);
+            if (existingEvent) {
+                existingEvent.status = status;
+            }
+        }
+    }
+
     /**
      * Clears all stored events and resets call counts.
      * Useful for test cleanup between test cases.

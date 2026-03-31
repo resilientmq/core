@@ -221,33 +221,54 @@ describe('ResilientEventPublisher', () => {
         });
 
         it('should gracefully handle fatal loop processing failure for single item', async () => {
+            jest.useRealTimers(); // Use real timers for async operations
+            
+            // Configure AmqpQueue mock FIRST to fail on publish
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockRejectedValue(new Error('Publishing broken completely')),
+                closed: false
+            }));
+
             const problematicEvent = {
                 id: 'evt-fatal',
                 messageId: 'evt-fatal',
                 type: 'TestEvent',
                 payload: { value: 1 },
-                status: EventPublishStatus.PENDING
+                status: EventPublishStatus.PENDING,
+                properties: { timestamp: Date.now() }
             };
+            
+            // Save the event first
+            await mockStore.saveEvent(problematicEvent);
+            
+            // Mock getPendingEvents to return our event
             mockStore.getPendingEvents = jest.fn().mockResolvedValue([problematicEvent]);
 
+            // NOW create the publisher with the failing mock
             publisher = new ResilientEventPublisher(config);
             (publisher as any).storeConnected = true;
 
-            // We inject a fake queue object before processPendingEvents calls connect()
-            // wait, processPendingEvents calls connect() which creates a new AmqpQueue.
-            // We can spy on AmqpQueue prototype instead!
-            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
-            const publishSpy = jest.spyOn(AmqpQueue.prototype, 'publish').mockRejectedValue(new Error('Publishing broken completely'));
-
-            mockStore.updateEventStatus = jest.fn().mockRejectedValue(new Error('Double fault updating status'));
+            // The batch update will be called with ERROR status
+            const batchUpdateSpy = jest.spyOn(mockStore, 'batchUpdateEventStatus');
 
             await publisher.processPendingEvents();
 
-            // This proves the catch block was hit and it tried to set ERROR status
-            expect(mockStore.updateEventStatus).toHaveBeenCalledWith(problematicEvent, EventPublishStatus.ERROR);
+            // Wait for flush interval to complete
+            await new Promise(resolve => setTimeout(resolve, 150));
 
-            publishSpy.mockRestore();
-        });
+            // Verify batch update was called with ERROR status
+            expect(batchUpdateSpy).toHaveBeenCalled();
+            
+            // Verify the event was updated to ERROR
+            const saved = await mockStore.getEvent(problematicEvent);
+            expect(saved?.status).toBe(EventPublishStatus.ERROR);
+            
+            jest.useFakeTimers(); // Restore fake timers
+        }, 10000);
 
         it('should catch and throw overall error during pending events processing root try/catch', async () => {
             publisher = new ResilientEventPublisher(config);
@@ -269,20 +290,33 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
-                publish: jest.fn().mockResolvedValue(undefined)
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
             }));
 
             publisher = new ResilientEventPublisher(config);
+            (publisher as any).storeConnected = true;
 
             // Return a Set (non-array iterable) to trigger Array.from branch
-            const eventSet = new Set([{ ...testEvent, messageId: 'msg-set-001' }]);
+            const event = { ...testEvent, messageId: 'msg-set-001', properties: { timestamp: Date.now() } };
+            
+            // Save the event first
+            await mockStore.saveEvent({ ...event, status: EventPublishStatus.PENDING });
+            
+            // Return a Set from getPendingEvents
+            const eventSet = new Set([event]);
             mockStore.getPendingEvents = jest.fn().mockResolvedValue(eventSet);
-            const updateSpy = jest.spyOn(mockStore, 'updateEventStatus');
+            const batchUpdateSpy = jest.spyOn(mockStore, 'batchUpdateEventStatus');
 
             await publisher.processPendingEvents();
 
-            // Should have processed the event from the Set
-            expect(updateSpy).toHaveBeenCalled();
+            // Should have processed the event from the Set using batch update
+            expect(batchUpdateSpy).toHaveBeenCalled();
+            
+            // Verify the event was updated
+            const saved = await mockStore.getEvent(event);
+            expect(saved?.status).toBe(EventPublishStatus.PUBLISHED);
         });
 
         it('should sort events without timestamp using 0 as fallback', async () => {
@@ -293,20 +327,32 @@ describe('ResilientEventPublisher', () => {
             AmqpQueue.mockImplementation(() => ({
                 connect: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
-                publish: jest.fn().mockResolvedValue(undefined)
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
             }));
 
             publisher = new ResilientEventPublisher(config);
+            (publisher as any).storeConnected = true;
 
             // Events without timestamp — triggers the `|| 0` fallback in sort
             const event1 = { ...testEvent, messageId: 'msg-no-ts-1', properties: {} };
             const event2 = { ...testEvent, messageId: 'msg-no-ts-2' }; // no properties at all
+            
+            // Save events first
+            await mockStore.saveEvent({ ...event1, status: EventPublishStatus.PENDING });
+            await mockStore.saveEvent({ ...event2, status: EventPublishStatus.PENDING });
+            
             mockStore.getPendingEvents = jest.fn().mockResolvedValue([event1, event2]);
-            const updateSpy = jest.spyOn(mockStore, 'updateEventStatus');
+            const batchUpdateSpy = jest.spyOn(mockStore, 'batchUpdateEventStatus');
 
             await publisher.processPendingEvents();
 
-            expect(updateSpy).toHaveBeenCalled();
+            expect(batchUpdateSpy).toHaveBeenCalled();
+            const saved1 = await mockStore.getEvent(event1);
+            const saved2 = await mockStore.getEvent(event2);
+            expect(saved1?.status).toBe(EventPublishStatus.PUBLISHED);
+            expect(saved2?.status).toBe(EventPublishStatus.PUBLISHED);
         });
 
         it('should process events in chronological order', async () => {
@@ -894,6 +940,122 @@ describe('ResilientEventPublisher', () => {
 
             expect(mockStore.getCallCount('saveEvent')).toBeGreaterThan(0);
             jest.useFakeTimers();
+        });
+    });
+
+    describe('coverage for uncovered lines', () => {
+        it('should skip processPendingEvents when already processing (line 129-130)', async () => {
+            config.instantPublish = false;
+            publisher = new ResilientEventPublisher(config);
+            (publisher as any).storeConnected = true;
+            (publisher as any).isProcessingPending = true;
+
+            const logSpy = jest.spyOn(require('../../../src/logger/logger'), 'log');
+            await publisher.processPendingEvents();
+
+            expect(logSpy).toHaveBeenCalledWith('debug', '[Publisher] Pending events processing already in progress, skipping');
+            logSpy.mockRestore();
+        });
+
+        it('should recover from channel error during publish (lines 321-347)', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            let publishAttempts = 0;
+            
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockImplementation(async () => {
+                    publishAttempts++;
+                    if (publishAttempts === 1) {
+                        const error = new Error('Channel closed');
+                        (error as any).stackAtStateChange = 'IllegalOperationError: Channel closed';
+                        throw error;
+                    }
+                }),
+                closed: false
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+            await publisher.publish(testEvent);
+
+            expect(publishAttempts).toBe(2);
+            const saved = await mockStore.getEvent(testEvent);
+            expect(saved?.status).toBe(EventPublishStatus.PUBLISHED);
+        });
+
+        it('should handle empty events array in processEventsWithRateLimit (line 479)', async () => {
+            publisher = new ResilientEventPublisher(config);
+            (publisher as any).storeConnected = true;
+
+            let progressCalled = false;
+            const onProgress = () => { progressCalled = true; };
+
+            await (publisher as any).processEventsWithRateLimit([], 10, 5, onProgress);
+            expect(progressCalled).toBe(false);
+        });
+
+        it('should handle reconnectPromise already in progress (line 329-331)', async () => {
+            jest.useRealTimers(); // Use real timers for this test
+            
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            let connectCalls = 0;
+            let disconnectCalls = 0;
+            
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockImplementation(async () => {
+                    connectCalls++;
+                    // Return a promise with controlled timing
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }),
+                disconnect: jest.fn().mockImplementation(async () => {
+                    disconnectCalls++;
+                }),
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+            
+            // Set connected to true to trigger the reconnection flow
+            (publisher as any).connected = true;
+
+            // Trigger two concurrent recovery attempts - the second should wait for the first
+            const recovery1 = (publisher as any).recoverBrokerConnection();
+            // Don't wait, immediately trigger second recovery
+            const recovery2 = (publisher as any).recoverBrokerConnection();
+
+            await Promise.all([recovery1, recovery2]);
+            
+            // Should only connect once (second call waits for first via reconnectPromise at line 329-331)
+            expect(connectCalls).toBe(1);
+            // Should disconnect once before reconnecting
+            expect(disconnectCalls).toBe(1);
+            
+            jest.useFakeTimers(); // Restore fake timers
+        }, 10000);
+
+        it('should return false for non-Error objects in isRecoverableChannelError (line 353)', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                forceClose: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockRejectedValue('string error'), // Throw string (not Error instance)
+                closed: false
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+            (publisher as any).storeConnected = true;
+
+            // This should fail because the error is not an Error instance
+            // and isRecoverableChannelError will return false (line 353), so it won't retry
+            await expect(publisher.publish(testEvent)).rejects.toBe('string error');
+            
+            // Verify the error was stored
+            const saved = await mockStore.getEvent(testEvent);
+            expect(saved?.status).toBe(EventPublishStatus.ERROR);
         });
     });
 });

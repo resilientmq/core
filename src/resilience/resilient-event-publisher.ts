@@ -150,6 +150,7 @@ export class ResilientEventPublisher {
             let totalSuccess = 0;
             let totalErrors = 0;
             let batchNumber = 0;
+            const startTime = Date.now();
 
             while (true) {
                 batchNumber++;
@@ -167,48 +168,29 @@ export class ResilientEventPublisher {
                     (a, b) => (a.properties?.timestamp || 0) - (b.properties?.timestamp || 0)
                 );
 
-                let index = 0;
-
-                while (index < sorted.length) {
-                    const windowStart = Date.now();
-                    const windowEvents = sorted.slice(index, index + maxPublishesPerSecond);
-
-                    await this.runWithConcurrency(windowEvents, maxConcurrentPublishes, async event => {
-                        try {
-                            await this.publishToBroker(event);
-                            await this.config.store!.updateEventStatus(event, EventPublishStatus.PUBLISHED);
-                            totalSuccess++;
-                            this.metrics?.increment('messagesPublished');
-                        } catch (error) {
-                            totalErrors++;
-                            this.metrics?.increment('processingErrors');
-                            log('error', `[Publisher] Failed to publish pending event ${event.messageId}`, error);
-
-                            try {
-                                await this.config.store!.updateEventStatus(event, EventPublishStatus.ERROR);
-                            } catch {}
-                        }
-                    });
-
-                    index += windowEvents.length;
-
-                    if (index < sorted.length) {
-                        const elapsed = Date.now() - windowStart;
-                        if (elapsed < 1000) {
-                            await this.sleep(1000 - elapsed);
-                        }
+                // Process events with rate limiting
+                await this.processEventsWithRateLimit(
+                    sorted,
+                    maxPublishesPerSecond,
+                    maxConcurrentPublishes,
+                    (success, errors) => {
+                        totalSuccess += success;
+                        totalErrors += errors;
                     }
-                }
+                );
 
                 if (pendingEvents.length < batchSize) {
                     break;
                 }
             }
 
+            const elapsed = Date.now() - startTime;
+            const actualRate = elapsed > 0 ? Math.round((totalSuccess / elapsed) * 1000) : 0;
+
             if (totalSuccess > 0 || totalErrors > 0) {
                 log(
                     'info',
-                    `[Publisher] Pending events done. Batches: ${batchNumber}, Success: ${totalSuccess}, Errors: ${totalErrors}, Rate: ${maxPublishesPerSecond}/s, Concurrency: ${maxConcurrentPublishes}`
+                    `[Publisher] Pending events done. Batches: ${batchNumber}, Success: ${totalSuccess}, Errors: ${totalErrors}, Time: ${elapsed}ms, Actual rate: ${actualRate}/s, Target rate: ${maxPublishesPerSecond}/s, Concurrency: ${maxConcurrentPublishes}`
                 );
             }
         } catch (error) {
@@ -483,30 +465,147 @@ export class ResilientEventPublisher {
         };
     }
 
-    private async runWithConcurrency<T>(
-        items: T[],
-        concurrency: number,
-        handler: (item: T) => Promise<void>
+    /**
+     * Processes events with rate limiting using a token bucket algorithm.
+     * This ensures we respect maxPublishesPerSecond while maximizing throughput.
+     */
+    private async processEventsWithRateLimit(
+        events: EventMessage[],
+        maxPublishesPerSecond: number,
+        maxConcurrentPublishes: number,
+        onProgress: (success: number, errors: number) => void
     ): Promise<void> {
-        if (!items.length) {
+        if (!events.length) {
             return;
         }
 
-        const workerCount = Math.min(concurrency, items.length);
+        // Token bucket algorithm parameters
+        const tokensPerSecond = maxPublishesPerSecond;
+        const bucketSize = Math.max(maxPublishesPerSecond, maxConcurrentPublishes * 2);
+        let tokens = bucketSize;
+        let lastRefill = Date.now();
+
+        // Tracking
+        let successCount = 0;
+        let errorCount = 0;
         let currentIndex = 0;
+        const activePromises = new Set<Promise<void>>();
 
-        await Promise.all(
-            Array.from({ length: workerCount }, async () => {
-                while (true) {
-                    const index = currentIndex++;
-                    if (index >= items.length) {
-                        return;
-                    }
-
-                    await handler(items[index]);
+        // Batch status updates to reduce store overhead
+        const statusUpdateQueue: Array<{ event: EventMessage; status: EventPublishStatus }> = [];
+        const supportsBatchUpdate = this.config.store?.batchUpdateEventStatus !== undefined;
+        
+        const flushStatusUpdates = async () => {
+            if (statusUpdateQueue.length === 0) return;
+            
+            const updates = [...statusUpdateQueue];
+            statusUpdateQueue.length = 0;
+            
+            if (supportsBatchUpdate) {
+                // Use batch update if available (much faster)
+                try {
+                    await this.config.store!.batchUpdateEventStatus!(updates);
+                } catch (error) {
+                    log('error', '[Publisher] Batch status update failed, falling back to individual updates', error);
+                    // Fallback to individual updates
+                    await Promise.all(
+                        updates.map(({ event, status }) =>
+                            this.config.store!.updateEventStatus(event, status).catch(() => {})
+                        )
+                    );
                 }
-            })
-        );
+            } else {
+                // Process updates in parallel (legacy mode)
+                await Promise.all(
+                    updates.map(({ event, status }) =>
+                        this.config.store!.updateEventStatus(event, status).catch(() => {})
+                    )
+                );
+            }
+        };
+
+        // Flush updates periodically
+        const flushInterval = setInterval(() => {
+            flushStatusUpdates().catch(() => {});
+        }, 100);
+
+        // Refill tokens based on elapsed time
+        const refillTokens = () => {
+            const now = Date.now();
+            const elapsed = (now - lastRefill) / 1000; // seconds
+            const tokensToAdd = elapsed * tokensPerSecond;
+            
+            if (tokensToAdd >= 1) {
+                tokens = Math.min(bucketSize, tokens + Math.floor(tokensToAdd));
+                lastRefill = now;
+            }
+        };
+
+        // Process a single event
+        const processEvent = async (event: EventMessage) => {
+            try {
+                await this.publishToBroker(event);
+                statusUpdateQueue.push({ event, status: EventPublishStatus.PUBLISHED });
+                successCount++;
+                this.metrics?.increment('messagesPublished');
+            } catch (error) {
+                errorCount++;
+                this.metrics?.increment('processingErrors');
+                log('error', `[Publisher] Failed to publish pending event ${event.messageId}`, error);
+                statusUpdateQueue.push({ event, status: EventPublishStatus.ERROR });
+            }
+        };
+
+        try {
+            // Main processing loop
+            while (currentIndex < events.length || activePromises.size > 0) {
+                refillTokens();
+
+                // Start new tasks if we have tokens and capacity
+                while (
+                    currentIndex < events.length &&
+                    tokens >= 1 &&
+                    activePromises.size < maxConcurrentPublishes
+                ) {
+                    tokens--;
+                    const event = events[currentIndex++];
+                    
+                    const promise = processEvent(event).finally(() => {
+                        activePromises.delete(promise);
+                    });
+                    
+                    activePromises.add(promise);
+                }
+
+                // Wait for at least one task to complete or for tokens to refill
+                if (activePromises.size > 0) {
+                    if (currentIndex < events.length && tokens < 1) {
+                        // Need to wait for tokens to refill
+                        const waitTime = Math.min(100, 1000 / tokensPerSecond);
+                        await Promise.race([
+                            Promise.race(Array.from(activePromises)),
+                            this.sleep(waitTime)
+                        ]);
+                    } else {
+                        // Just wait for any task to complete
+                        await Promise.race(Array.from(activePromises));
+                    }
+                } else if (currentIndex < events.length && tokens < 1) {
+                    // No active tasks but need tokens
+                    const waitTime = Math.min(100, 1000 / tokensPerSecond);
+                    await this.sleep(waitTime);
+                }
+            }
+
+            // Flush any remaining status updates
+            await flushStatusUpdates();
+        } finally {
+            clearInterval(flushInterval);
+            // Final flush to ensure all updates are persisted
+            await flushStatusUpdates();
+        }
+
+        onProgress(successCount, errorCount);
     }
 
     private assertPositiveInteger(name: string, value: number): void {

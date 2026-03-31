@@ -62,4 +62,16 @@ export interface EventStore {
      * @returns Array of events matching the given status.
      */
     getEventsByStatus?(status: EventConsumeStatus | EventPublishStatus): Promise<EventMessage[]>;
+
+    /**
+     * Updates the status of multiple events in a single batch operation.
+     * This method is optional but highly recommended for performance when processing
+     * large numbers of events. When not implemented, falls back to individual updates.
+     *
+     * @param updates - Array of event-status pairs to update.
+     * @returns Promise that resolves when all updates are complete.
+     */
+    batchUpdateEventStatus?(
+        updates: Array<{ event: EventMessage; status: EventConsumeStatus | EventPublishStatus }>
+    ): Promise<void>;
 }
