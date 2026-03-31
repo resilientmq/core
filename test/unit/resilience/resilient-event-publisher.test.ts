@@ -984,17 +984,6 @@ describe('ResilientEventPublisher', () => {
             expect(saved?.status).toBe(EventPublishStatus.PUBLISHED);
         });
 
-        it('should handle empty events array in processEventsWithRateLimit (line 479)', async () => {
-            publisher = new ResilientEventPublisher(config);
-            (publisher as any).storeConnected = true;
-
-            let progressCalled = false;
-            const onProgress = () => { progressCalled = true; };
-
-            await (publisher as any).processEventsWithRateLimit([], 10, 5, onProgress);
-            expect(progressCalled).toBe(false);
-        });
-
         it('should handle reconnectPromise already in progress (line 329-331)', async () => {
             jest.useRealTimers(); // Use real timers for this test
             

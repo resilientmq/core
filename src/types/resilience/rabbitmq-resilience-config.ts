@@ -223,9 +223,11 @@ export type ResilientEventHooks = {
 };
 
 export interface ProcessPendingEventsOptions {
+    /**
+     * Number of events to retrieve and process per batch.
+     * Default: 100
+     */
     batchSize?: number;
-    maxPublishesPerSecond?: number;
-    maxConcurrentPublishes?: number;
 }
 
 /**

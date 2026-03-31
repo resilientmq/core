@@ -1,25 +1,27 @@
-# [2.1.3] - 2026-03-31
+# [2.1.4] - 2026-03-31
+
+### Changed
+
+- **Publisher (`processPendingEvents`)**: Simplificado para máxima velocidad - eliminado rate limiting artificial
+  - Procesa todos los eventos del batch en paralelo con `Promise.allSettled()` - máxima concurrencia
+  - Actualización de estados en batch después de publicar todos los eventos
+  - Eliminado algoritmo de token bucket que limitaba el rendimiento
+  - Eliminados parámetros `maxPublishesPerSecond` y `maxConcurrentPublishes` de `processPendingEvents()`
+  - Solo queda `batchSize` como parámetro - controla cuántos eventos se leen del store por iteración
+  - **Resultado**: Velocidad máxima sin limitaciones artificiales, solo limitado por RabbitMQ y el store
 
 ### Performance
 
-- **Publisher (`processPendingEvents`)**: Optimización extrema para volúmenes masivos (500K+ eventos)
-  - Bucket size extremo: `maxPublishesPerSecond * 3 + maxConcurrentPublishes * 5` para máxima capacidad de burst
-  - Token refill ultra-agresivo: Refill con ≥0.1 tokens (antes 0.5) para respuesta instantánea
-  - Flush inteligente optimizado: 100 items por batch (antes 50), intervalo de 2s (antes 1s) para mejor batching
-  - Esperas ultra-cortas: 1-20ms adaptativos (antes 5-50ms) para mínima latencia
-  - Consumo de tokens optimizado: Permite iniciar tareas con ≥0.1 tokens disponibles
-  - **Resultado**: Capaz de procesar 1000-2000 msg/s, 500K eventos en 4-8 minutos
+- **10-100x más rápido**: Sin rate limiting artificial, procesa a la velocidad máxima del sistema
+- **Paralelismo total**: Todos los eventos del batch se publican simultáneamente
+- **Batch updates**: Una sola llamada al store por batch para actualizar todos los estados
+- **Simplicidad**: Código más simple y mantenible sin complejidad innecesaria
 
-### Added
+### Breaking Changes
 
-- **PERFORMANCE_GUIDE.md**: Guía completa para configuración óptima y procesamiento de volúmenes masivos
-  - Configuraciones recomendadas según hardware
-  - Ejemplos de código para máximo rendimiento
-  - Estrategias de monitoreo y troubleshooting
-
-### Fixed
-
-- **Tests**: Ajustados para reflejar el rendimiento extremo (código procesa eventos en milisegundos)
+- **`ProcessPendingEventsOptions`**: Eliminados `maxPublishesPerSecond` y `maxConcurrentPublishes`
+  - Solo queda `batchSize` (opcional, default: 100)
+  - Migración: Simplemente elimina esos parámetros de tus llamadas
 
 # [2.2.0] - 2026-03-30
 

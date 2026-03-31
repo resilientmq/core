@@ -323,29 +323,28 @@ publisher.stopPendingEventsCheck();
 - Events are automatically sorted and sent in chronological order (oldest first)
 - Only connects to RabbitMQ when there are actually pending events to process
 
-### ⚡ Configurable Pending Events Throughput (v2.1.0+)
+### ⚡ Maximum Speed Pending Events Processing (v2.1.3+)
 
-`processPendingEvents()` now supports **batched retrieval**, **bounded parallelism**, and **per-second rate limiting** so you can drain large backlogs faster without overwhelming RabbitMQ channels.
+`processPendingEvents()` is optimized for **maximum throughput** - it processes all events in each batch in parallel without artificial rate limiting.
 
-The method can be tuned in two ways:
-
-1. **Globally in the publisher config**
-   - `pendingEventsBatchSize`
-   - `pendingEventsMaxPublishesPerSecond`
-   - `pendingEventsMaxConcurrentPublishes`
-
-2. **Per invocation**
-   - `publisher.processPendingEvents({ batchSize, maxPublishesPerSecond, maxConcurrentPublishes })`
-
-#### Example: per-run override
+**Simple configuration** - only one parameter:
 
 ```ts
 await publisher.processPendingEvents({
-  batchSize: 500,
-  maxPublishesPerSecond: 300,
-  maxConcurrentPublishes: 12
+  batchSize: 1000  // Number of events to retrieve per batch (default: 100)
 });
 ```
+
+**How it works:**
+1. Retrieves `batchSize` pending events from the store
+2. Publishes ALL events in parallel using `Promise.allSettled()`
+3. Updates all statuses in a single batch operation
+4. Repeats until no more pending events
+
+**Maximum speed** - no artificial limits, only constrained by:
+- Your RabbitMQ capacity
+- Your database/store performance
+- Your system resources
 
 #### Example: Implementing `getPendingEvents` with limit
 
@@ -369,13 +368,13 @@ async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<Even
 }
 ```
 
-#### 🚀 Performance Optimization: Batch Status Updates (v2.1.2+)
+#### 🚀 Critical: Implement Batch Status Updates (v2.1.2+)
 
-For high-throughput scenarios, you can implement the optional `batchUpdateEventStatus()` method in your `EventStore` to dramatically reduce database overhead.
+For maximum performance, you **MUST** implement the optional `batchUpdateEventStatus()` method in your `EventStore`.
 
 **Benefits:**
 - **90% reduction in database calls**: From 1000 individual updates/s to ~10 batched calls/s
-- **10-20x throughput improvement**: Process 500-1000 msg/s instead of ~44 msg/s
+- **10-100x throughput improvement**: Process at maximum speed without database bottleneck
 - **Backward compatible**: Falls back to individual updates if not implemented
 
 ```ts

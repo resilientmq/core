@@ -93,9 +93,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             const startTime = Date.now();
             
             await publisher.processPendingEvents({
-                batchSize: 100,
-                maxPublishesPerSecond: 50,
-                maxConcurrentPublishes: 10
+                batchSize: 100
             });
 
             const elapsed = Date.now() - startTime;
@@ -133,9 +131,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             }
 
             await publisher.processPendingEvents({
-                batchSize: 200,
-                maxPublishesPerSecond: 100,
-                maxConcurrentPublishes: 50
+                batchSize: 200
             });
 
             // Verify all events were processed
@@ -188,9 +184,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             }
 
             await publisher.processPendingEvents({
-                batchSize: 50,
-                maxPublishesPerSecond: 25,
-                maxConcurrentPublishes: 5
+                batchSize: 50
             });
 
             // Count successes and errors
@@ -218,9 +212,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
 
             // No pending events
             await expect(publisher.processPendingEvents({
-                batchSize: 100,
-                maxPublishesPerSecond: 50,
-                maxConcurrentPublishes: 10
+                batchSize: 100
             })).resolves.not.toThrow();
         });
 
@@ -239,9 +231,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             await mockStore.saveEvent({ ...event, status: EventPublishStatus.PENDING });
 
             await publisher.processPendingEvents({
-                batchSize: 1,
-                maxPublishesPerSecond: 10,
-                maxConcurrentPublishes: 1
+                batchSize: 1
             });
 
             const saved = await mockStore.getEvent(event);
@@ -272,9 +262,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             const startTime = Date.now();
             
             await publisher.processPendingEvents({
-                batchSize: 50,
-                maxPublishesPerSecond: 25,
-                maxConcurrentPublishes: 5
+                batchSize: 50
             });
 
             const elapsed = Date.now() - startTime;
@@ -326,9 +314,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             }
 
             await publisher.processPendingEvents({
-                batchSize: 40,
-                maxPublishesPerSecond: 30,
-                maxConcurrentPublishes: 10
+                batchSize: 40
             });
 
             // Verify all events were processed despite variable delays
@@ -360,9 +346,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             }
 
             await publisher.processPendingEvents({
-                batchSize: 50,
-                maxPublishesPerSecond: 40,
-                maxConcurrentPublishes: 10
+                batchSize: 50
             });
 
             // Verify all events were processed across batches
@@ -387,22 +371,6 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             expect(() => {
                 publisher = new ResilientEventPublisher(config);
             }).toThrow('Configuration error: "pendingEventsBatchSize" must be a positive integer');
-        });
-
-        it('should throw error for invalid maxPublishesPerSecond', () => {
-            config.pendingEventsMaxPublishesPerSecond = 0;
-            
-            expect(() => {
-                publisher = new ResilientEventPublisher(config);
-            }).toThrow('Configuration error: "pendingEventsMaxPublishesPerSecond" must be a positive integer');
-        });
-
-        it('should throw error for invalid maxConcurrentPublishes', () => {
-            config.pendingEventsMaxConcurrentPublishes = -5;
-            
-            expect(() => {
-                publisher = new ResilientEventPublisher(config);
-            }).toThrow('Configuration error: "pendingEventsMaxConcurrentPublishes" must be a positive integer');
         });
 
         it('should throw error for non-integer batchSize', () => {
@@ -527,9 +495,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             const batchUpdateSpy = jest.spyOn(mockStore, 'batchUpdateEventStatus');
 
             await publisher.processPendingEvents({
-                batchSize: 50,
-                maxPublishesPerSecond: 30,
-                maxConcurrentPublishes: 10
+                batchSize: 50
             });
 
             // Verify batchUpdateEventStatus was called
@@ -588,9 +554,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             });
 
             await publisher.processPendingEvents({
-                batchSize: 20,
-                maxPublishesPerSecond: 15,
-                maxConcurrentPublishes: 5
+                batchSize: 20
             });
 
             // Verify fallback to individual updates was triggered (lines 511-516)
@@ -690,9 +654,7 @@ describe('ResilientEventPublisher - Pending Events Processing', () => {
             storeWithoutBatch.resetCallCounts();
 
             await publisher.processPendingEvents({
-                batchSize: 15,
-                maxPublishesPerSecond: 20,
-                maxConcurrentPublishes: 5
+                batchSize: 15
             });
 
             // Verify individual updates were used (lines 519-521)
