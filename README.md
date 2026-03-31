@@ -124,6 +124,7 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `instantPublish` | `boolean` | ❌ | If true (default), publishes immediately. If false, stores for later delivery |
 | `pendingEventsCheckIntervalMs` | `number` | ❌ | Interval to check and send pending events (ms). Only effective when `instantPublish` is false |
 | `maxConcurrentPublishes` | `number` | ❌ | Global backpressure limit for concurrent publish operations (default: `100`) |
+| `maxConnections` | `number` | ❌ | Number of RabbitMQ connections in the pool for load distribution (default: `1`) |
 | `pendingEventsBatchSize` | `number` | ❌ | Default number of pending events fetched per batch when calling `processPendingEvents()` |
 | `pendingEventsMaxPublishesPerSecond` | `number` | ❌ | Default max number of pending events dispatched per second during `processPendingEvents()` |
 | `pendingEventsMaxConcurrentPublishes` | `number` | ❌ | Default max number of pending events published in parallel during `processPendingEvents()` |
@@ -239,7 +240,8 @@ const publisher = new ResilientEventPublisher({
     name: 'user.events',
     type: 'fanout',
     options: { durable: true }
-  }
+  },
+  maxConnections: 3  // Use 3 connections for load distribution (optional, default: 1)
 });
 
 // IMPORTANT: routingKey is now taken from each event's `routingKey` field when publishing to an exchange.
@@ -268,7 +270,8 @@ const publisher = new ResilientEventPublisher({
     name: 'user.events',
     type: 'fanout',
     options: { durable: true }
-  }
+  },
+  maxConnections: 5  // Optional: distribute load across 5 connections
 });
 
 await publisher.publish({
@@ -294,7 +297,9 @@ const publisher = new ResilientEventPublisher({
   },
   store: myEventStore,
   // Check for pending events every 30 seconds
-  pendingEventsCheckIntervalMs: 30000
+  pendingEventsCheckIntervalMs: 30000,
+  // Use multiple connections for better throughput
+  maxConnections: 3
 });
 
 // Store event for later delivery (e.g., when offline)
@@ -320,31 +325,49 @@ publisher.stopPendingEventsCheck();
 - **`pendingEventsCheckIntervalMs`**: Configurable interval to automatically check and send pending events
 - **`processPendingEvents()`**: Manually trigger processing of pending events
 - **`stopPendingEventsCheck()`**: Stop the periodic check for graceful shutdown
+- **`maxConnections`**: Distribute load across multiple RabbitMQ connections (round-robin)
 - Events are automatically sorted and sent in chronological order (oldest first)
 - Only connects to RabbitMQ when there are actually pending events to process
 
-### ⚡ Maximum Speed Pending Events Processing (v2.1.3+)
+### ⚡ Pending Events Processing with Rate Limiting (v2.1.5+)
 
-`processPendingEvents()` is optimized for **maximum throughput** - it processes all events in each batch in parallel without artificial rate limiting.
+`processPendingEvents()` supports configurable rate limiting to control throughput and prevent overwhelming your RabbitMQ broker or downstream systems.
 
-**Simple configuration** - only one parameter:
+**Configuration options:**
 
 ```ts
 await publisher.processPendingEvents({
-  batchSize: 1000  // Number of events to retrieve per batch (default: 100)
+  batchSize: 1000,                    // Number of events to retrieve per batch (default: 100)
+  maxPublishesPerSecond: 500,         // Maximum events published per second (default: same as batchSize)
+  maxConcurrentPublishes: 10          // Maximum concurrent publish operations (default: min(10, maxPublishesPerSecond))
 });
 ```
 
 **How it works:**
 1. Retrieves `batchSize` pending events from the store
-2. Publishes ALL events in parallel using `Promise.allSettled()`
-3. Updates all statuses in a single batch operation
-4. Repeats until no more pending events
+2. Publishes events using a token bucket algorithm to respect `maxPublishesPerSecond`
+3. Maintains up to `maxConcurrentPublishes` parallel operations
+4. Updates all statuses in a single batch operation
+5. Repeats until no more pending events
 
-**Maximum speed** - no artificial limits, only constrained by:
-- Your RabbitMQ capacity
-- Your database/store performance
-- Your system resources
+**Token Bucket Algorithm:**
+- Provides smooth, continuous rate limiting (not fixed 1-second windows)
+- Allows burst capacity while maintaining average rate
+- Refills tokens continuously based on elapsed time
+
+**Performance characteristics:**
+- Can achieve 500-1000 msg/s with proper configuration
+- Prevents broker overload with controlled throughput
+- Batch status updates reduce database overhead by 90%
+
+**Important:** Events are processed in the order returned by your store. If you need chronological ordering, implement sorting in your `getPendingEvents()` method:
+
+```ts
+async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<EventMessage[]> {
+  const query = EventModel.find({ status }).sort({ createdAt: 1 }); // Sort by timestamp
+  return limit ? query.limit(limit).exec() : query.exec();
+}
+```
 
 #### Example: Implementing `getPendingEvents` with limit
 

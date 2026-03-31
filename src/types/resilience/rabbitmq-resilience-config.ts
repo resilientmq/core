@@ -228,6 +228,18 @@ export interface ProcessPendingEventsOptions {
      * Default: 100
      */
     batchSize?: number;
+
+    /**
+     * Maximum number of events to publish per second (rate limiting).
+     * Default: same as batchSize
+     */
+    maxPublishesPerSecond?: number;
+
+    /**
+     * Maximum number of concurrent publish operations.
+     * Default: min(10, maxPublishesPerSecond)
+     */
+    maxConcurrentPublishes?: number;
 }
 
 /**
@@ -298,7 +310,20 @@ export type ResilientPublisherConfig = {
      * @default false
      */
     metricsEnabled?: boolean;
+    
+    /**
+     * Maximum number of concurrent publish operations globally.
+     * @default 100
+     */
     maxConcurrentPublishes?: number;
+    
+    /**
+     * Maximum number of RabbitMQ connections to create in the pool.
+     * Multiple connections distribute load and improve throughput.
+     * @default 1
+     */
+    maxConnections?: number;
+    
     pendingEventsBatchSize?: number;
     pendingEventsMaxPublishesPerSecond?: number;
     pendingEventsMaxConcurrentPublishes?: number;

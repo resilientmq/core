@@ -1,3 +1,65 @@
+# [2.2.0] - 2026-03-31
+
+### Added
+
+- **Connection Pool**: Publisher now supports multiple RabbitMQ connections for load distribution
+  - New `maxConnections` configuration parameter (default: 1)
+  - Round-robin distribution strategy across connection pool
+  - Improves throughput by distributing load across multiple connections
+  - All connections are managed automatically (connect/disconnect/recovery)
+  - Backward compatible - defaults to single connection behavior
+
+### Changed
+
+- **Publisher Architecture**: Refactored from single connection to connection pool
+  - Changed from `queue: AmqpQueue` to `connectionPool: AmqpQueue[]`
+  - Added `getNextConnection()` method for round-robin selection
+  - Updated `connect()` to connect all connections in pool using `Promise.all()`
+  - Updated `disconnect()` to disconnect all connections in pool
+  - Updated `publishToBroker()` to use `getNextConnection()` for load distribution
+  - Updated `recoverBrokerConnection()` to accept specific queue parameter
+
+### Migration Notes
+
+No breaking changes. To use connection pooling, simply add `maxConnections` to your publisher config:
+
+```typescript
+const publisher = new ResilientEventPublisher({
+  connection: 'amqp://localhost',
+  exchange: { name: 'events', type: 'topic' },
+  maxConnections: 5  // Use 5 connections for load distribution
+});
+```
+
+# [2.1.5] - 2026-03-31
+
+### Changed
+
+- **Publisher (`processPendingEvents`)**: Restored rate limiting functionality from version 2.1.2
+  - Re-implemented token bucket algorithm for controlled throughput
+  - Added back `maxPublishesPerSecond` and `maxConcurrentPublishes` parameters to `ProcessPendingEventsOptions`
+  - Removed automatic sorting of events by timestamp - events are now processed in the order returned by the store
+  - Maintains batch status updates for optimal performance
+
+### Added
+
+- **Configuration validation**: Added validation for `pendingEventsMaxPublishesPerSecond` and `pendingEventsMaxConcurrentPublishes` in publisher config
+
+### Removed
+
+- **Event sorting**: Removed automatic chronological sorting in `processPendingEvents()` - the store is now responsible for returning events in the desired order
+
+### Migration Notes
+
+If you need events processed in chronological order, ensure your `EventStore.getPendingEvents()` implementation returns events sorted by timestamp:
+
+```typescript
+async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<EventMessage[]> {
+  const query = EventModel.find({ status }).sort({ createdAt: 1 }); // Sort by creation time
+  return limit ? query.limit(limit).exec() : query.exec();
+}
+```
+
 # [2.1.4] - 2026-03-31
 
 ### Changed
