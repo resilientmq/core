@@ -12,4 +12,3 @@ export function applyMiddleware(
     };
     return compose(middlewares, context, handler);
 }
-

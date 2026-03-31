@@ -250,7 +250,7 @@ describe('Benchmark: Pending Events Throughput', () => {
         console.log(`\n🏆 Best performance: batchSize=${best.batchSize} with ${best.throughput} msg/s`);
 
         expect(results.length).toBe(batchSizes.length);
-    }, 120000);
+    }, 180000); // 3 minutes - processes 10k events with 4 different batch sizes
 
     it('should measure throughput with store that does NOT support batch updates', async () => {
         const eventCount = 1000;
