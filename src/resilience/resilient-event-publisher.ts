@@ -479,9 +479,9 @@ export class ResilientEventPublisher {
             return;
         }
 
-        // Token bucket algorithm parameters
+        // Extreme optimization: larger bucket for massive throughput
         const tokensPerSecond = maxPublishesPerSecond;
-        const bucketSize = Math.max(maxPublishesPerSecond, maxConcurrentPublishes * 2);
+        const bucketSize = Math.max(maxPublishesPerSecond * 3, maxConcurrentPublishes * 5);
         let tokens = bucketSize;
         let lastRefill = Date.now();
 
@@ -491,9 +491,10 @@ export class ResilientEventPublisher {
         let currentIndex = 0;
         const activePromises = new Set<Promise<void>>();
 
-        // Batch status updates to reduce store overhead
+        // Batch status updates - optimized for massive volumes
         const statusUpdateQueue: Array<{ event: EventMessage; status: EventPublishStatus }> = [];
         const supportsBatchUpdate = this.config.store?.batchUpdateEventStatus !== undefined;
+        let flushPromise: Promise<void> | null = null;
         
         const flushStatusUpdates = async () => {
             if (statusUpdateQueue.length === 0) return;
@@ -502,12 +503,10 @@ export class ResilientEventPublisher {
             statusUpdateQueue.length = 0;
             
             if (supportsBatchUpdate) {
-                // Use batch update if available (much faster)
                 try {
                     await this.config.store!.batchUpdateEventStatus!(updates);
                 } catch (error) {
                     log('error', '[Publisher] Batch status update failed, falling back to individual updates', error);
-                    // Fallback to individual updates
                     await Promise.all(
                         updates.map(({ event, status }) =>
                             this.config.store!.updateEventStatus(event, status).catch(() => {})
@@ -515,7 +514,6 @@ export class ResilientEventPublisher {
                     );
                 }
             } else {
-                // Process updates in parallel (legacy mode)
                 await Promise.all(
                     updates.map(({ event, status }) =>
                         this.config.store!.updateEventStatus(event, status).catch(() => {})
@@ -524,19 +522,32 @@ export class ResilientEventPublisher {
             }
         };
 
-        // Flush updates periodically
-        const flushInterval = setInterval(() => {
-            flushStatusUpdates().catch(() => {});
-        }, 100);
+        // Aggressive flush strategy for maximum throughput
+        const triggerFlush = () => {
+            if (flushPromise || statusUpdateQueue.length === 0) return;
+            
+            // Flush at 100 items for optimal batching (larger batches = fewer DB calls)
+            if (statusUpdateQueue.length >= 100) {
+                flushPromise = flushStatusUpdates().finally(() => { flushPromise = null; });
+            }
+        };
 
-        // Refill tokens based on elapsed time
+        // Longer interval for better batching with large volumes
+        const flushInterval = setInterval(() => {
+            if (!flushPromise && statusUpdateQueue.length > 0) {
+                flushPromise = flushStatusUpdates().finally(() => { flushPromise = null; });
+            }
+        }, 2000);
+
+        // Aggressive token refill
         const refillTokens = () => {
             const now = Date.now();
-            const elapsed = (now - lastRefill) / 1000; // seconds
+            const elapsed = (now - lastRefill) / 1000;
             const tokensToAdd = elapsed * tokensPerSecond;
             
-            if (tokensToAdd >= 1) {
-                tokens = Math.min(bucketSize, tokens + Math.floor(tokensToAdd));
+            // Refill even with small amounts
+            if (tokensToAdd >= 0.1) {
+                tokens = Math.min(bucketSize, tokens + tokensToAdd);
                 lastRefill = now;
             }
         };
@@ -548,26 +559,28 @@ export class ResilientEventPublisher {
                 statusUpdateQueue.push({ event, status: EventPublishStatus.PUBLISHED });
                 successCount++;
                 this.metrics?.increment('messagesPublished');
+                triggerFlush();
             } catch (error) {
                 errorCount++;
                 this.metrics?.increment('processingErrors');
                 log('error', `[Publisher] Failed to publish pending event ${event.messageId}`, error);
                 statusUpdateQueue.push({ event, status: EventPublishStatus.ERROR });
+                triggerFlush();
             }
         };
 
         try {
-            // Main processing loop
+            // Ultra-optimized main loop for massive volumes
             while (currentIndex < events.length || activePromises.size > 0) {
                 refillTokens();
 
-                // Start new tasks if we have tokens and capacity
+                // Aggressively fill the pipeline
                 while (
                     currentIndex < events.length &&
-                    tokens >= 1 &&
+                    tokens >= 0.1 &&
                     activePromises.size < maxConcurrentPublishes
                 ) {
-                    tokens--;
+                    tokens -= 1;
                     const event = events[currentIndex++];
                     
                     const promise = processEvent(event).finally(() => {
@@ -577,31 +590,31 @@ export class ResilientEventPublisher {
                     activePromises.add(promise);
                 }
 
-                // Wait for at least one task to complete or for tokens to refill
+                // Minimal waiting - only when absolutely necessary
                 if (activePromises.size > 0) {
-                    if (currentIndex < events.length && tokens < 1) {
-                        // Need to wait for tokens to refill
-                        const waitTime = Math.min(100, 1000 / tokensPerSecond);
-                        await Promise.race([
-                            Promise.race(Array.from(activePromises)),
-                            this.sleep(waitTime)
-                        ]);
-                    } else {
-                        // Just wait for any task to complete
-                        await Promise.race(Array.from(activePromises));
-                    }
-                } else if (currentIndex < events.length && tokens < 1) {
-                    // No active tasks but need tokens
-                    const waitTime = Math.min(100, 1000 / tokensPerSecond);
+                    await Promise.race(activePromises);
+                } else if (currentIndex < events.length && tokens < 0.1) {
+                    // Ultra-short wait for token refill
+                    const waitTime = Math.min(20, Math.max(1, 100 / tokensPerSecond));
                     await this.sleep(waitTime);
+                    refillTokens();
                 }
             }
 
-            // Flush any remaining status updates
+            // Wait for any pending flush
+            if (flushPromise) {
+                await flushPromise;
+            }
+            
+            // Final flush
             await flushStatusUpdates();
         } finally {
             clearInterval(flushInterval);
-            // Final flush to ensure all updates are persisted
+            
+            // Ensure final flush completes
+            if (flushPromise) {
+                await flushPromise;
+            }
             await flushStatusUpdates();
         }
 
