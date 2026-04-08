@@ -123,10 +123,14 @@ export class ResilientEventConsumeProcessor {
             return Number.isFinite(val) && val >= 0 ? Math.floor(val) : 0;
         }
 
-        // Fallback for in-flight messages during upgrades
+        // Fallback for in-flight messages during upgrades.
+        // Only use x-death entries from the current consume queue to avoid
+        // counting retries produced by other consumers/services.
         const death = headers['x-death'];
         if (Array.isArray(death) && death.length > 0) {
-            const rawCount = death[0].count;
+            const consumeQueue = this.config.consumeQueue.queue;
+            const fromCurrentQueue = death.find((d: any) => d?.queue === consumeQueue);
+            const rawCount = fromCurrentQueue?.count;
             const val = Number(rawCount !== undefined && rawCount !== null ? rawCount : 0);
             return Number.isFinite(val) && val >= 0 ? Math.floor(val) : 0;
         }

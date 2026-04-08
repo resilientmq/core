@@ -148,7 +148,7 @@ describe('ResilientEventConsumeProcessor', () => {
             expect(handler).toHaveBeenCalledTimes(2);
         });
 
-        it('should fall back to x-death headers when x-retry-count is absent (backward compat)', async () => {
+        it('should fall back to x-death headers from current consume queue when x-retry-count is absent', async () => {
             const handler = jest.fn();
             config.eventsToProcess = [{ type: 'test.event', handler }];
             processor = new ResilientEventConsumeProcessor(config);
@@ -159,7 +159,7 @@ describe('ResilientEventConsumeProcessor', () => {
             // Simulate retry with x-death header (legacy/in-flight messages)
             testEvent.properties = {
                 headers: {
-                    'x-death': [{ count: 1 }]
+                    'x-death': [{ queue: 'test.queue', count: 1 }]
                 }
             };
 
@@ -167,6 +167,26 @@ describe('ResilientEventConsumeProcessor', () => {
 
             // Handler should be called twice
             expect(handler).toHaveBeenCalledTimes(2);
+        });
+
+        it('should ignore x-death counts from other queues when x-retry-count is absent', async () => {
+            const handler = jest.fn();
+            config.eventsToProcess = [{ type: 'test.event', handler }];
+            processor = new ResilientEventConsumeProcessor(config);
+
+            await processor.process(testEvent);
+
+            testEvent.properties = {
+                headers: {
+                    'x-death': [{ queue: 'other.queue', count: 50 }]
+                }
+            };
+
+            await processor.process(testEvent);
+
+            // Since x-death entry is from another queue, retry count must be treated as 0
+            // and duplicate processing should be skipped.
+            expect(handler).toHaveBeenCalledTimes(1);
         });
 
         it('should execute middleware before handler', async () => {
