@@ -24,7 +24,12 @@ export class ResilientEventConsumeProcessor {
         // Hard guard: already at or past the limit — route to DLQ immediately
         if (retryCount >= maxAttempts) {
             log('warn', `[Processor] Message ${event.messageId} exceeded max retries (${retryCount}/${maxAttempts})`);
-            await this.sendToDlqOrDiscard(event, retryCount, new Error(`Max retry attempts (${maxAttempts}) exceeded`));
+            try {
+                await this.sendToDlqOrDiscard(event, retryCount, new Error(`Max retry attempts (${maxAttempts}) exceeded`));
+            } catch (dlqErr) {
+                log('error', `[Processor] CRITICAL: Hard guard failed to route ${event.messageId} to DLQ. ` +
+                    `Message will be ACKed to break nack loop. Error: ${(dlqErr as Error).message}`);
+            }
             return;
         }
 

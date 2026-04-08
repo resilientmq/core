@@ -999,5 +999,86 @@ describe('ResilientEventConsumeProcessor', () => {
             const publishedEvent = mockBroker.publish.mock.calls[0][1];
             expect(publishedEvent.properties?.headers?.['x-error-stack']).toBe('');
         });
+
+        it('should ACK (not throw) when hard guard DLQ publish fails — prevents infinite nack loop', async () => {
+            const handler = jest.fn();
+            config.eventsToProcess = [{ type: 'test.event', handler }];
+            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
+            config.deadLetterQueue = {
+                queue: 'test.dlq',
+                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
+            };
+            processor = new ResilientEventConsumeProcessor(config);
+
+            // Simulate max retries exceeded
+            testEvent.properties = {
+                headers: { 'x-retry-count': 100 }
+            };
+
+            // Make DLQ publish fail — without the fix this would throw and cause a nack loop
+            mockBroker.publish.mockRejectedValue(new Error('DLQ publish failed'));
+
+            // MUST NOT throw — message will be ACKed to break the loop
+            await expect(processor.process(testEvent)).resolves.not.toThrow();
+
+            // Handler must NOT have been called (hard guard fires before handler)
+            expect(handler).not.toHaveBeenCalled();
+        });
+
+        it('should ACK (not throw) when hard guard store update fails — prevents infinite nack loop', async () => {
+            const handler = jest.fn();
+            config.eventsToProcess = [{ type: 'test.event', handler }];
+            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
+            config.deadLetterQueue = {
+                queue: 'test.dlq',
+                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
+            };
+            processor = new ResilientEventConsumeProcessor(config);
+
+            // Simulate max retries exceeded
+            testEvent.properties = {
+                headers: { 'x-retry-count': 3 }
+            };
+
+            // Make store.updateEventStatus fail — sendToDlqOrDiscard calls this first
+            jest.spyOn(mockStore, 'updateEventStatus').mockRejectedValue(new Error('DB connection lost'));
+
+            // MUST NOT throw — hard guard catches the error and ACKs
+            await expect(processor.process(testEvent)).resolves.not.toThrow();
+            expect(handler).not.toHaveBeenCalled();
+        });
+
+        it('should still send to DLQ successfully from hard guard when publish works', async () => {
+            const handler = jest.fn();
+            config.eventsToProcess = [{ type: 'test.event', handler }];
+            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
+            config.deadLetterQueue = {
+                queue: 'test.dlq',
+                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
+            };
+            processor = new ResilientEventConsumeProcessor(config);
+
+            // Pre-save event (simulates that it was stored during earlier processing attempts)
+            await mockStore.saveEvent(testEvent);
+
+            testEvent.properties = {
+                headers: { 'x-retry-count': 5 }
+            };
+
+            // Normal case — DLQ publish succeeds (regression test for the try-catch addition)
+            await processor.process(testEvent);
+
+            expect(handler).not.toHaveBeenCalled();
+            expect(mockBroker.publish).toHaveBeenCalledWith(
+                'test.dlq',
+                expect.objectContaining({ messageId: testEvent.messageId }),
+                expect.objectContaining({
+                    exchange: expect.objectContaining({ name: 'dlq.exchange' })
+                })
+            );
+
+            const savedEvent = await mockStore.getEvent(testEvent);
+            expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
+        });
     });
 });
