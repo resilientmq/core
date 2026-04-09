@@ -62,7 +62,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
 
             await Promise.all(events.map(event => publisher.publish(event)));
 
-            expect(mockStore.getCallCount('saveEvent')).toBe(5);
+            expect(mockStore.getCallCount('saveEventIfNotExists')).toBe(5);
         });
 
         it('should publish multiple events sequentially', async () => {
@@ -77,7 +77,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
                 await publisher.publish(event);
             }
 
-            expect(mockStore.getCallCount('saveEvent')).toBe(3);
+            expect(mockStore.getCallCount('saveEventIfNotExists')).toBe(3);
         });
     });
 
@@ -85,11 +85,11 @@ describe('ResilientEventPublisher - Extended Tests', () => {
         it('should validate store connection before publishing', async () => {
             publisher = new ResilientEventPublisher(config);
 
-            const getEventSpy = jest.spyOn(mockStore, 'getEvent');
+            const saveIfNotExistsSpy = jest.spyOn(mockStore, 'saveEventIfNotExists');
 
             await publisher.publish(testEvent);
 
-            expect(getEventSpy).toHaveBeenCalled();
+            expect(saveIfNotExistsSpy).toHaveBeenCalled();
         });
 
         it('should check for duplicate messages', async () => {
@@ -99,7 +99,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
             await publisher.publish(testEvent); // Same message ID
 
             // Should only save once (duplicate detected)
-            expect(mockStore.getCallCount('saveEvent')).toBe(1);
+            expect(mockStore.getCallCount('saveEventIfNotExists')).toBe(2);
         });
     });
 
@@ -281,7 +281,7 @@ describe('ResilientEventPublisher - Extended Tests', () => {
             // All should eventually complete
             await Promise.all(events.map(event => publisher.publish(event)));
 
-            expect(mockStore.getCallCount('saveEvent')).toBe(10);
+            expect(mockStore.getCallCount('saveEventIfNotExists')).toBe(10);
         });
     });
 });

@@ -1,5 +1,5 @@
 import { AmqpQueue } from '../broker/amqp-queue';
-import { log } from '../logger/logger';
+import { isLogLevelEnabled, log } from '../logger/logger';
 import {
     EventMessage,
     EventPublishStatus,
@@ -10,20 +10,36 @@ import { MetricsCollector, ResilientMQMetrics } from '../metrics/metrics-collect
 
 export class ResilientEventPublisher {
     private readonly connectionPool: AmqpQueue[];
+    private pendingConnectionPool?: AmqpQueue[];
     private currentConnectionIndex = 0;
+    private pendingCurrentConnectionIndex = 0;
     private pendingEventsInterval?: NodeJS.Timeout;
     private idleTimer?: NodeJS.Timeout;
     private connectPromise?: Promise<void>;
+    private pendingConnectPromise?: Promise<void>;
     private reconnectPromise?: Promise<void>;
+    private pendingReconnectPromise?: Promise<void>;
+    private storeReconnectInFlight?: Promise<void>;
+    private lastStoreReconnectAttemptAt = 0;
     private readonly instantPublish: boolean;
     private storeConnected = false;
     private connected = false;
+    private pendingConnected = false;
     private lastPublishTime = 0;
     private pendingOperations = 0;
     private isProcessingPending = false;
     private readonly maxConcurrentPublishes: number;
     private readonly maxConnections: number;
+    private readonly pendingMaxConnections: number;
+    private readonly separatePendingConnections: boolean;
     private readonly metrics?: MetricsCollector;
+    private readonly publishDestination: string;
+    private readonly publishOptions?: { exchange?: ResilientPublisherConfig['exchange'] };
+    private readonly pendingSlotWaiters: Array<() => void> = [];
+    private readonly pendingAdaptiveConcurrencyEnabled: boolean;
+    private readonly pendingAdaptiveEwmaAlpha: number;
+    private readonly pendingAdaptiveErrorThresholdSoft: number;
+    private readonly pendingAdaptiveErrorThresholdHard: number;
 
     public getMetrics(): ResilientMQMetrics | undefined {
         return this.metrics?.getSnapshot();
@@ -32,8 +48,16 @@ export class ResilientEventPublisher {
     constructor(private readonly config: ResilientPublisherConfig) {
         this.maxConcurrentPublishes = config.maxConcurrentPublishes ?? 100;
         this.maxConnections = config.maxConnections ?? 1;
+        this.separatePendingConnections = config.separatePendingConnections !== false;
+        this.pendingMaxConnections = config.pendingMaxConnections ?? this.maxConnections;
+        this.pendingAdaptiveConcurrencyEnabled = config.pendingAdaptiveConcurrency !== false;
+        this.pendingAdaptiveEwmaAlpha = config.pendingAdaptiveEwmaAlpha ?? 0.2;
+        this.pendingAdaptiveErrorThresholdSoft = config.pendingAdaptiveErrorThresholdSoft ?? 0.08;
+        this.pendingAdaptiveErrorThresholdHard = config.pendingAdaptiveErrorThresholdHard ?? 0.2;
         this.validateConfig();
         this.instantPublish = config.instantPublish !== false;
+        this.publishDestination = this.config.queue ?? this.config.exchange!.name;
+        this.publishOptions = this.config.exchange ? { exchange: this.config.exchange } : undefined;
         
         // Initialize connection pool
         this.connectionPool = [];
@@ -70,11 +94,7 @@ export class ResilientEventPublisher {
 
     async publish(event: EventMessage, options?: { storeOnly?: boolean }): Promise<void> {
         const metrics = this.metrics;
-        while (this.pendingOperations >= this.maxConcurrentPublishes) {
-            await this.sleep(10);
-        }
-
-        this.pendingOperations++;
+        await this.acquirePendingSlot();
 
         try {
             const store = this.config.store;
@@ -82,17 +102,29 @@ export class ResilientEventPublisher {
 
             if (store) {
                 if (!this.storeConnected) {
-                    await this.checkStoreConnection();
+                    await this.ensureStoreConnection();
                 }
-
-                const existing = await store.getEvent(event);
-                if (existing) {
-                    log('warn', `[Publisher] Duplicate message: ${event.messageId}, skipping`);
-                    return;
-                }
-
                 event.status = EventPublishStatus.PENDING;
-                await store.saveEvent(event);
+
+                if (store.saveEventIfNotExists) {
+                    const inserted = await store.saveEventIfNotExists(event);
+                    if (!inserted) {
+                        if (isLogLevelEnabled('warn')) {
+                            log('warn', `[Publisher] Duplicate message: ${event.messageId}, skipping`);
+                        }
+                        return;
+                    }
+                } else {
+                    const existing = await store.getEvent(event);
+                    if (existing) {
+                        if (isLogLevelEnabled('warn')) {
+                            log('warn', `[Publisher] Duplicate message: ${event.messageId}, skipping`);
+                        }
+                        return;
+                    }
+
+                    await store.saveEvent(event);
+                }
             } else {
                 event.status = EventPublishStatus.PENDING;
             }
@@ -105,9 +137,13 @@ export class ResilientEventPublisher {
                 }
 
                 metrics?.increment('messagesPublished');
-                log('info', `[Publisher] Published ${event.messageId}`);
+                if (isLogLevelEnabled('info')) {
+                    log('info', `[Publisher] Published ${event.messageId}`);
+                }
             } else {
-                log('debug', `[Publisher] Stored ${event.messageId} for later delivery`);
+                if (isLogLevelEnabled('debug')) {
+                    log('debug', `[Publisher] Stored ${event.messageId} for later delivery`);
+                }
             }
         } catch (error) {
             metrics?.increment('processingErrors');
@@ -121,7 +157,7 @@ export class ResilientEventPublisher {
 
             throw error;
         } finally {
-            this.pendingOperations--;
+            this.releasePendingSlot();
         }
     }
 
@@ -152,10 +188,10 @@ export class ResilientEventPublisher {
 
         try {
             if (!this.storeConnected) {
-                await this.checkStoreConnection();
+                await this.ensureStoreConnection();
             }
 
-            await this.connect();
+            await this.connect(true);
             this.resetIdleTimer();
 
             let totalSuccess = 0;
@@ -195,10 +231,12 @@ export class ResilientEventPublisher {
             const actualRate = elapsed > 0 ? Math.round((totalSuccess / elapsed) * 1000) : 0;
 
             if (totalSuccess > 0 || totalErrors > 0) {
-                log(
-                    'info',
-                    `[Publisher] Pending events done. Batches: ${batchNumber}, Success: ${totalSuccess}, Errors: ${totalErrors}, Time: ${elapsed}ms, Actual rate: ${actualRate}/s, Target rate: ${maxPublishesPerSecond}/s, Concurrency: ${maxConcurrentPublishes}`
-                );
+                if (isLogLevelEnabled('info')) {
+                    log(
+                        'info',
+                        `[Publisher] Pending events done. Batches: ${batchNumber}, Success: ${totalSuccess}, Errors: ${totalErrors}, Time: ${elapsed}ms, Actual rate: ${actualRate}/s, Target rate: ${maxPublishesPerSecond}/s, Concurrency: ${maxConcurrentPublishes}`
+                    );
+                }
             }
         } catch (error) {
             this.metrics?.increment('processingErrors');
@@ -210,13 +248,13 @@ export class ResilientEventPublisher {
 
             throw error;
         } finally {
-            this.pendingOperations--;
+            this.releasePendingSlot();
             this.isProcessingPending = false;
         }
     }
 
     public async disconnect(): Promise<void> {
-        if (!this.connected) {
+        if (!this.connected && !this.pendingConnected) {
             return;
         }
 
@@ -225,11 +263,15 @@ export class ResilientEventPublisher {
             this.idleTimer = undefined;
         }
 
-        // Disconnect all connections in the pool
-        await Promise.all(
-            this.connectionPool.map(queue => queue.disconnect())
-        );
+        const pools: AmqpQueue[][] = [this.connectionPool];
+        if (this.pendingConnectionPool) {
+            pools.push(this.pendingConnectionPool);
+        }
+
+        // Disconnect all connections in active pools
+        await Promise.all(pools.flatMap(pool => pool.map(queue => queue.disconnect())));
         this.connected = false;
+        this.pendingConnected = false;
     }
 
     public stopPendingEventsCheck(): void {
@@ -240,19 +282,66 @@ export class ResilientEventPublisher {
     }
 
     public isConnected(): boolean {
-        return this.connected;
+        return this.connected || this.pendingConnected;
     }
 
     /**
      * Get the next connection from the pool using round-robin strategy
      */
-    private getNextConnection(): AmqpQueue {
+    private ensurePendingConnectionPool(): AmqpQueue[] {
+        if (!this.pendingConnectionPool) {
+            this.pendingConnectionPool = [];
+            for (let i = 0; i < this.pendingMaxConnections; i++) {
+                this.pendingConnectionPool.push(new AmqpQueue(this.config.connection));
+            }
+        }
+
+        return this.pendingConnectionPool;
+    }
+
+    /**
+     * Get next connection from either realtime or pending pool using round-robin.
+     */
+    private getNextConnection(usePendingPool: boolean): AmqpQueue {
+        if (usePendingPool && this.separatePendingConnections) {
+            const pool = this.ensurePendingConnectionPool();
+            const connection = pool[this.pendingCurrentConnectionIndex];
+            this.pendingCurrentConnectionIndex = (this.pendingCurrentConnectionIndex + 1) % pool.length;
+            return connection;
+        }
+
         const connection = this.connectionPool[this.currentConnectionIndex];
-        this.currentConnectionIndex = (this.currentConnectionIndex + 1) % this.maxConnections;
+        this.currentConnectionIndex = (this.currentConnectionIndex + 1) % this.connectionPool.length;
         return connection;
     }
 
-    private async connect(): Promise<void> {
+    private async connect(usePendingPool = false): Promise<void> {
+        if (usePendingPool && this.separatePendingConnections) {
+            const pool = this.ensurePendingConnectionPool();
+            if (this.pendingConnected && !pool.some(q => q.closed)) {
+                return;
+            }
+
+            if (this.pendingConnectPromise) {
+                await this.pendingConnectPromise;
+                return;
+            }
+
+            this.pendingConnectPromise = (async () => {
+                await Promise.all(pool.map(queue => queue.connect()));
+                this.pendingConnected = true;
+                this.lastPublishTime = Date.now();
+                this.startIdleMonitoring();
+            })();
+
+            try {
+                await this.pendingConnectPromise;
+            } finally {
+                this.pendingConnectPromise = undefined;
+            }
+            return;
+        }
+
         const pool = this.connectionPool;
         if (this.connected && !pool.some(q => q.closed)) {
             return;
@@ -264,10 +353,7 @@ export class ResilientEventPublisher {
         }
 
         this.connectPromise = (async () => {
-            // Connect all connections in the pool
-            await Promise.all(
-                pool.map(queue => queue.connect())
-            );
+            await Promise.all(pool.map(queue => queue.connect()));
             this.connected = true;
             this.lastPublishTime = Date.now();
             this.startIdleMonitoring();
@@ -294,13 +380,15 @@ export class ResilientEventPublisher {
         this.idleTimer = setTimeout(async () => {
             const idleTime = Date.now() - this.lastPublishTime;
 
-            if (idleTime >= idleTimeout && this.connected && this.pendingOperations === 0) {
+            const anyPoolConnected = this.connected || this.pendingConnected;
+
+            if (idleTime >= idleTimeout && anyPoolConnected && this.pendingOperations === 0) {
                 try {
                     await this.disconnect();
                 } catch (error) {
                     log('error', '[Publisher] Error during idle disconnect', error);
                 }
-            } else if (this.connected) {
+            } else if (anyPoolConnected) {
                 this.startIdleMonitoring();
             }
         }, idleTimeout);
@@ -328,32 +416,51 @@ export class ResilientEventPublisher {
         }, intervalMs);
     }
 
-    private async publishToBroker(event: EventMessage): Promise<void> {
-        const { queue: configuredQueue, exchange } = this.config;
-        const destination = configuredQueue ?? exchange!.name;
-
-        await this.connect();
+    private async publishToBroker(event: EventMessage, usePendingPool = false): Promise<void> {
+        await this.connect(usePendingPool);
         this.resetIdleTimer();
 
         // Get next connection from pool (round-robin)
-        const brokerConnection = this.getNextConnection();
-        const publishOptions = { exchange };
+        const brokerConnection = this.getNextConnection(usePendingPool);
 
         try {
-            await brokerConnection.publish(destination, event, publishOptions);
-            this.resetIdleTimer();
+            await brokerConnection.publish(this.publishDestination, event, this.publishOptions);
         } catch (error) {
             if (!this.isRecoverableChannelError(error)) {
                 throw error;
             }
 
-            await this.recoverBrokerConnection(brokerConnection);
-            await brokerConnection.publish(destination, event, publishOptions);
-            this.resetIdleTimer();
+            await this.recoverBrokerConnection(brokerConnection, usePendingPool);
+            await brokerConnection.publish(this.publishDestination, event, this.publishOptions);
         }
+
+        this.resetIdleTimer();
     }
 
-    private async recoverBrokerConnection(queue: AmqpQueue): Promise<void> {
+    private async recoverBrokerConnection(queue: AmqpQueue, usePendingPool: boolean): Promise<void> {
+        if (usePendingPool && this.separatePendingConnections) {
+            if (this.pendingReconnectPromise) {
+                await this.pendingReconnectPromise;
+                return;
+            }
+
+            this.pendingReconnectPromise = (async () => {
+                try {
+                    await queue.disconnect();
+                } catch {}
+
+                await queue.connect();
+                this.resetIdleTimer();
+            })();
+
+            try {
+                await this.pendingReconnectPromise;
+            } finally {
+                this.pendingReconnectPromise = undefined;
+            }
+            return;
+        }
+
         if (this.reconnectPromise) {
             await this.reconnectPromise;
             return;
@@ -426,11 +533,75 @@ export class ResilientEventPublisher {
         }
     }
 
+    private async ensureStoreConnection(): Promise<void> {
+        if (!this.config.store) {
+            this.storeConnected = false;
+            return;
+        }
+
+        if (this.storeConnected) {
+            return;
+        }
+
+        if (this.storeReconnectInFlight) {
+            await this.storeReconnectInFlight;
+            return;
+        }
+
+        const now = Date.now();
+        const minInterval = this.config.storeConnectionRetryDelayMs ?? 1000;
+        const elapsed = now - this.lastStoreReconnectAttemptAt;
+        if (elapsed < minInterval) {
+            if (this.storeReconnectInFlight) {
+                await this.storeReconnectInFlight;
+            }
+            // Throttle reconnect attempts without blocking the publish hot path.
+            return;
+        }
+
+        this.lastStoreReconnectAttemptAt = now;
+        this.storeReconnectInFlight = this.checkStoreConnection().finally(() => {
+            this.storeReconnectInFlight = undefined;
+        });
+
+        await this.storeReconnectInFlight;
+    }
+
     private validateConfig(): void {
         const instantPublish = this.config.instantPublish !== false;
 
         this.assertPositiveInteger('maxConcurrentPublishes', this.maxConcurrentPublishes);
         this.assertPositiveInteger('maxConnections', this.maxConnections);
+        this.assertPositiveInteger('pendingMaxConnections', this.pendingMaxConnections);
+
+        if (this.pendingAdaptiveEwmaAlpha <= 0 || this.pendingAdaptiveEwmaAlpha > 1) {
+            throw new Error('[Publisher] Configuration error: "pendingAdaptiveEwmaAlpha" must be > 0 and <= 1');
+        }
+
+        if (
+            this.pendingAdaptiveErrorThresholdSoft < 0 ||
+            this.pendingAdaptiveErrorThresholdSoft > 1
+        ) {
+            throw new Error('[Publisher] Configuration error: "pendingAdaptiveErrorThresholdSoft" must be between 0 and 1');
+        }
+
+        if (
+            this.pendingAdaptiveErrorThresholdHard < 0 ||
+            this.pendingAdaptiveErrorThresholdHard > 1
+        ) {
+            throw new Error('[Publisher] Configuration error: "pendingAdaptiveErrorThresholdHard" must be between 0 and 1');
+        }
+
+        if (this.pendingAdaptiveErrorThresholdHard < this.pendingAdaptiveErrorThresholdSoft) {
+            throw new Error('[Publisher] Configuration error: "pendingAdaptiveErrorThresholdHard" must be >= "pendingAdaptiveErrorThresholdSoft"');
+        }
+
+        if (
+            this.config.pendingAdaptiveTargetLatencyMs !== undefined &&
+            this.config.pendingAdaptiveTargetLatencyMs <= 0
+        ) {
+            throw new Error('[Publisher] Configuration error: "pendingAdaptiveTargetLatencyMs" must be > 0');
+        }
 
         if (this.config.pendingEventsBatchSize !== undefined) {
             this.assertPositiveInteger('pendingEventsBatchSize', this.config.pendingEventsBatchSize);
@@ -518,16 +689,30 @@ export class ResilientEventPublisher {
         let errorCount = 0;
         let currentIndex = 0;
         const activePromises = new Set<Promise<void>>();
+        let currentConcurrencyLimit = maxConcurrentPublishes;
+        const ewmaAlpha = this.pendingAdaptiveEwmaAlpha;
+        const latencyTargetMs = this.config.pendingAdaptiveTargetLatencyMs ?? Math.max(5, Math.floor(1000 / Math.max(1, tokensPerSecond)));
+        let ewmaLatencyMs = 0;
+        let ewmaErrorRate = 0;
+        let activeCompletionResolve: (() => void) | undefined;
+        let nextActiveCompletion = new Promise<void>(resolve => {
+            activeCompletionResolve = resolve;
+        });
 
         // Batch status updates to reduce store overhead
         const statusUpdateQueue: Array<{ event: EventMessage; status: EventPublishStatus }> = [];
         const supportsBatchUpdate = this.config.store?.batchUpdateEventStatus !== undefined;
+        const flushBatchThreshold = 64;
+        const flushIntervalMs = 100;
+        let lastFlushAt = Date.now();
+        const canUseFullParallel =
+            events.length <= maxConcurrentPublishes &&
+            tokensPerSecond >= events.length;
 
         const flushStatusUpdates = async () => {
             if (statusUpdateQueue.length === 0) return;
 
-            const updates = [...statusUpdateQueue];
-            statusUpdateQueue.length = 0;
+            const updates = statusUpdateQueue.splice(0, statusUpdateQueue.length);
 
             if (supportsBatchUpdate) {
                 // Use batch update if available (much faster)
@@ -552,11 +737,6 @@ export class ResilientEventPublisher {
             }
         };
 
-        // Flush updates periodically
-        const flushInterval = setInterval(() => {
-            flushStatusUpdates().catch(() => {});
-        }, 100);
-
         // Refill tokens based on elapsed time
         const refillTokens = () => {
             const now = Date.now();
@@ -569,22 +749,98 @@ export class ResilientEventPublisher {
             }
         };
 
+        const updateAdaptiveSignals = (latencyMs: number, failed: boolean) => {
+            ewmaLatencyMs = ewmaLatencyMs === 0
+                ? latencyMs
+                : (ewmaLatencyMs * (1 - ewmaAlpha)) + (latencyMs * ewmaAlpha);
+
+            const errorSample = failed ? 1 : 0;
+            ewmaErrorRate = (ewmaErrorRate * (1 - ewmaAlpha)) + (errorSample * ewmaAlpha);
+        };
+
         // Process a single event
         const processEvent = async (event: EventMessage) => {
+            const startedAt = Date.now();
+            let failed = false;
             try {
-                await this.publishToBroker(event);
+                await this.publishToBroker(event, true);
                 statusUpdateQueue.push({ event, status: EventPublishStatus.PUBLISHED });
                 successCount++;
                 this.metrics?.increment('messagesPublished');
             } catch (error) {
                 errorCount++;
+                failed = true;
                 this.metrics?.increment('processingErrors');
                 log('error', `[Publisher] Failed to publish pending event ${event.messageId}`, error);
                 statusUpdateQueue.push({ event, status: EventPublishStatus.ERROR });
+            } finally {
+                const latencyMs = Date.now() - startedAt;
+                updateAdaptiveSignals(latencyMs, failed);
             }
         };
 
+        const rebalanceConcurrency = () => {
+            if (!this.pendingAdaptiveConcurrencyEnabled) {
+                return;
+            }
+
+            if (ewmaErrorRate >= this.pendingAdaptiveErrorThresholdHard) {
+                // Aggressive backoff when failures spike.
+                currentConcurrencyLimit = Math.max(
+                    1,
+                    currentConcurrencyLimit - Math.max(1, Math.ceil(currentConcurrencyLimit * 0.25))
+                );
+                return;
+            }
+
+            if (ewmaErrorRate >= this.pendingAdaptiveErrorThresholdSoft || ewmaLatencyMs > (latencyTargetMs * 3)) {
+                currentConcurrencyLimit = Math.max(1, currentConcurrencyLimit - 1);
+                return;
+            }
+
+            if (ewmaErrorRate <= 0.02 && ewmaLatencyMs <= (latencyTargetMs * 1.25)) {
+                currentConcurrencyLimit = Math.min(maxConcurrentPublishes, currentConcurrencyLimit + 1);
+            }
+        };
+
+        const signalActiveCompletion = () => {
+            const resolve = activeCompletionResolve;
+            activeCompletionResolve = undefined;
+
+            if (resolve) {
+                resolve();
+            }
+
+            nextActiveCompletion = new Promise<void>(nextResolve => {
+                activeCompletionResolve = nextResolve;
+            });
+        };
+
+        const waitForActiveCompletion = async (waitForTokens: boolean) => {
+            if (activePromises.size === 0) {
+                return;
+            }
+
+            if (!waitForTokens) {
+                await nextActiveCompletion;
+                return;
+            }
+
+            const waitTime = Math.min(100, 1000 / tokensPerSecond);
+            await Promise.race([
+                nextActiveCompletion,
+                this.sleep(waitTime)
+            ]);
+        };
+
         try {
+            if (canUseFullParallel) {
+                await Promise.all(events.map(event => processEvent(event)));
+                await flushStatusUpdates();
+                onProgress(successCount, errorCount);
+                return;
+            }
+
             // Main processing loop
             while (currentIndex < events.length || activePromises.size > 0) {
                 refillTokens();
@@ -593,13 +849,14 @@ export class ResilientEventPublisher {
                 while (
                     currentIndex < events.length &&
                     tokens >= 1 &&
-                    activePromises.size < maxConcurrentPublishes
+                    activePromises.size < currentConcurrencyLimit
                 ) {
                     tokens--;
                     const event = events[currentIndex++];
 
                     const promise = processEvent(event).finally(() => {
                         activePromises.delete(promise);
+                        signalActiveCompletion();
                     });
 
                     activePromises.add(promise);
@@ -609,26 +866,31 @@ export class ResilientEventPublisher {
                 if (activePromises.size > 0) {
                     if (currentIndex < events.length && tokens < 1) {
                         // Need to wait for tokens to refill
-                        const waitTime = Math.min(100, 1000 / tokensPerSecond);
-                        await Promise.race([
-                            Promise.race(Array.from(activePromises)),
-                            this.sleep(waitTime)
-                        ]);
+                        await waitForActiveCompletion(true);
                     } else {
                         // Just wait for any task to complete
-                        await Promise.race(Array.from(activePromises));
+                        await waitForActiveCompletion(false);
                     }
                 } else if (currentIndex < events.length && tokens < 1) {
                     // No active tasks but need tokens
                     const waitTime = Math.min(100, 1000 / tokensPerSecond);
                     await this.sleep(waitTime);
                 }
+
+                const now = Date.now();
+                if (
+                    statusUpdateQueue.length > 0 &&
+                    (statusUpdateQueue.length >= flushBatchThreshold || now - lastFlushAt >= flushIntervalMs)
+                ) {
+                    await flushStatusUpdates();
+                    lastFlushAt = now;
+                    rebalanceConcurrency();
+                }
             }
 
             // Flush any remaining status updates
             await flushStatusUpdates();
         } finally {
-            clearInterval(flushInterval);
             // Final flush to ensure all updates are persisted
             await flushStatusUpdates();
         }
@@ -639,6 +901,50 @@ export class ResilientEventPublisher {
     private assertPositiveInteger(name: string, value: number): void {
         if (!Number.isInteger(value) || value <= 0) {
             throw new Error(`[Publisher] Configuration error: "${name}" must be a positive integer`);
+        }
+    }
+
+    private async acquirePendingSlot(): Promise<void> {
+        while (this.pendingOperations >= this.maxConcurrentPublishes) {
+            await new Promise<void>(resolve => {
+                let settled = false;
+
+                const waiter = () => {
+                    if (settled) {
+                        return;
+                    }
+
+                    settled = true;
+                    clearTimeout(timeoutId);
+                    resolve();
+                };
+
+                const timeoutId = setTimeout(() => {
+                    if (settled) {
+                        return;
+                    }
+
+                    settled = true;
+                    const idx = this.pendingSlotWaiters.indexOf(waiter);
+                    if (idx >= 0) {
+                        this.pendingSlotWaiters.splice(idx, 1);
+                    }
+                    resolve();
+                }, 10);
+
+                this.pendingSlotWaiters.push(waiter);
+            });
+        }
+
+        this.pendingOperations++;
+    }
+
+    private releasePendingSlot(): void {
+        this.pendingOperations = Math.max(0, this.pendingOperations - 1);
+
+        const nextWaiter = this.pendingSlotWaiters.shift();
+        if (nextWaiter) {
+            nextWaiter();
         }
     }
 

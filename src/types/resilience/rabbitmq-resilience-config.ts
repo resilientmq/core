@@ -76,6 +76,7 @@ export type ResilientConsumerConfig = {
 
     /**
      * This configuration enables or disables the option to ignore unknown events.
+        * @default true
      */
     ignoreUnknownEvents?: boolean;
 
@@ -129,6 +130,18 @@ export type ResilientConsumerConfig = {
      * Number of messages to prefetch for the consumer.
      */
     prefetch?: number;
+
+    /**
+     * Enables RabbitMQ single-active-consumer mode for the main consume queue.
+     *
+     * When set, this value is applied to queue arguments as
+     * `x-single-active-consumer`.
+     *
+     * - `true`: only one active consumer at a time (others stay standby)
+     * - `false`: allow normal concurrent consumer distribution
+     * - `undefined`: keep existing queue argument behavior
+     */
+    singleActiveConsumer?: boolean;
 
     /**
      * Prefetch used by the secondary cleanup consumer connection (only when
@@ -332,8 +345,55 @@ export type ResilientPublisherConfig = {
      * @default 1
      */
     maxConnections?: number;
+
+    /**
+     * When true (default), pending/retry publishing uses a dedicated
+     * RabbitMQ connection pool separate from realtime publishing.
+     * @default true
+     */
+    separatePendingConnections?: boolean;
+
+    /**
+     * Maximum number of RabbitMQ connections for the dedicated pending/retry
+     * pool when `separatePendingConnections` is enabled.
+     * Defaults to `maxConnections`.
+     */
+    pendingMaxConnections?: number;
     
     pendingEventsBatchSize?: number;
     pendingEventsMaxPublishesPerSecond?: number;
     pendingEventsMaxConcurrentPublishes?: number;
+
+    /**
+     * Enables adaptive pending concurrency based on latency/error signals.
+     * @default true
+     */
+    pendingAdaptiveConcurrency?: boolean;
+
+    /**
+     * EWMA alpha used for adaptive pending signals.
+     * Must be > 0 and <= 1.
+     * @default 0.2
+     */
+    pendingAdaptiveEwmaAlpha?: number;
+
+    /**
+     * Target latency (ms) used to scale pending concurrency.
+     * Defaults to a rate-derived value when omitted.
+     */
+    pendingAdaptiveTargetLatencyMs?: number;
+
+    /**
+     * Soft error-rate threshold (EWMA) that triggers gradual backoff.
+     * Must be between 0 and 1.
+     * @default 0.08
+     */
+    pendingAdaptiveErrorThresholdSoft?: number;
+
+    /**
+     * Hard error-rate threshold (EWMA) that triggers aggressive backoff.
+     * Must be between 0 and 1, and >= soft threshold.
+     * @default 0.2
+     */
+    pendingAdaptiveErrorThresholdHard?: number;
 };

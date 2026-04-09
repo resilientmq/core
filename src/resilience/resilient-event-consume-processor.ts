@@ -1,11 +1,11 @@
 import { applyMiddleware } from './middleware';
 import { IgnoredEventError } from './ignored-event-error';
-import { log } from '../logger/logger';
+import { isLogLevelEnabled, log } from '../logger/logger';
 import { EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig } from '../types';
 
 /**
  * Internal error used to short-circuit processing for unknown events when
- * `ignoreUnknownEvents` is enabled. The queue layer will nack the message
+ * `ignoreUnknownEvents` is enabled. The queue layer will ack the message
  * without requeueing so it is discarded immediately.
  */
 class UnknownEventDiscardError extends Error {
@@ -15,7 +15,6 @@ class UnknownEventDiscardError extends Error {
     }
 }
 
-
 /**
  * Handles the lifecycle of consuming events: deduplication, retries, and DLQ routing.
  *
@@ -23,15 +22,24 @@ class UnknownEventDiscardError extends Error {
  * to avoid unreliable counting when multiple concurrent consumers race on the same retry queue.
  */
 export class ResilientEventConsumeProcessor {
-    constructor(private readonly config: RabbitMQResilientProcessorConfig) {}
+    private readonly eventHandlerMap: Map<string, any>;
+
+    constructor(private readonly config: RabbitMQResilientProcessorConfig) {
+        this.eventHandlerMap = new Map(config.eventsToProcess.map((e) => [e.type, e]));
+    }
 
     /**
      * Processes an event: applies middleware, deduplicates, invokes the handler,
      * and manages retries or DLQ routing on failure.
+     * 
+     * Optimizations:
+     * - Fast-path for unknown events when ignoreUnknownEvents is enabled
+     * - Cached event type matching using Map for O(1) lookups
+     * - Lazy middleware initialization
      */
     async process(event: EventMessage): Promise<void> {
         const { config } = this;
-        const { store, eventsToProcess, events, middleware, retryQueue, ignoreUnknownEvents } = config;
+        const { store, events, middleware, retryQueue, ignoreUnknownEvents } = config;
         const retryCount = this.getRetryCount(event);
         const maxAttempts = retryQueue?.maxAttempts ?? 3;
 
@@ -53,50 +61,67 @@ export class ResilientEventConsumeProcessor {
             events?.onEventStart?.(event, control);
             if (control.skipEvent) return;
 
-            // Deduplication
+            // Fast path: find event handler
+            const match = event.type ? this.findEventHandler(event.type) : null;
+            if (match && isLogLevelEnabled('info')) {
+                log('info', `[Processor] Processing ${event.messageId} (type: ${event.type}, attempt: ${retryCount + 1})`);
+            }
+
+            // Hot-path optimization: ignore unknown events before any store I/O.
+            if (!match && ignoreUnknownEvents) {
+                if (isLogLevelEnabled('debug')) {
+                    log('debug', `[Processor] Unknown event ${event.messageId} skipped immediately`);
+                }
+                throw new UnknownEventDiscardError(`Unknown event type: ${event.type}`);
+            }
+
+            // Deduplication and early storage only if needed
             let existing = null;
             if (store) {
                 existing = await store.getEvent(event);
-            }
-
-            const match = eventsToProcess.find(e => e.type === event.type);
-            if (match) log('info', `[Processor] Processing ${event.messageId} (type: ${event.type}, attempt: ${retryCount + 1})`);
-
-            if (existing && retryCount === 0) {
-                log('warn', `[Processor] Duplicate event: ${event.messageId}, skipping`);
-                return;
-            } else if (existing) {
-                if (store) await store.updateEventStatus(event, event.status as EventConsumeStatus);
-            } else if (match || !ignoreUnknownEvents) {
-                if (store) await store.saveEvent(event);
-            }
-
-            if (!match) {
-                if (ignoreUnknownEvents) {
-                    log('debug', `[Processor] Unknown event ${event.messageId} skipped immediately`);
-                    throw new UnknownEventDiscardError(`Unknown event type: ${event.type}`);
+                if (existing && retryCount === 0) {
+                    if (isLogLevelEnabled('warn')) {
+                        log('warn', `[Processor] Duplicate event: ${event.messageId}, skipping`);
+                    }
+                    return;
                 }
+                if (!existing && match) {
+                    await store.saveEvent(event);
+                }
+            }
 
+            // Unknown events (only when ignoreUnknownEvents=false at this point)
+            if (!match) {
                 if (store) {
+                    if (!existing) {
+                        await store.saveEvent(event);
+                    }
                     await store.updateEventStatus(event, EventConsumeStatus.DONE);
                 }
+                if (isLogLevelEnabled('debug')) {
+                    log('debug', `[Processor] Unknown event ${event.messageId} type: ${event.type} marked as DONE`);
+                }
                 return;
             }
 
-            const runner = async () => {
+            // Execute handler with middleware
+            if (middleware?.length) {
+                const runner = async () => {
+                    if (store) await store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
+                    await match.handler(event);
+                    if (store) await store.updateEventStatus(event, EventConsumeStatus.DONE);
+                };
+                await applyMiddleware(middleware, event, runner);
+            } else {
                 if (store) await store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
                 await match.handler(event);
                 if (store) await store.updateEventStatus(event, EventConsumeStatus.DONE);
-                events?.onSuccess?.(event);
-            };
-
-            if (middleware?.length) {
-                await applyMiddleware(middleware, event, runner);
-            } else {
-                await runner();
             }
 
-            log('info', `[Processor] Successfully processed ${event.messageId}`);
+            events?.onSuccess?.(event);
+            if (isLogLevelEnabled('info')) {
+                log('info', `[Processor] Successfully processed ${event.messageId}`);
+            }
 
         } catch (err) {
             if (err instanceof UnknownEventDiscardError) {
@@ -111,6 +136,7 @@ export class ResilientEventConsumeProcessor {
                 events?.onSuccess?.(event);
                 return;
             }
+
             log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
 
             // Safety wrapper: failures in retry/DLQ logic must NOT propagate to avoid nack loops
@@ -141,6 +167,13 @@ export class ResilientEventConsumeProcessor {
     }
 
     // ─── Private helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Optimized event handler lookup using cached Map for O(1) performance.
+     */
+    private findEventHandler(eventType: string): any {
+        return this.eventHandlerMap.get(eventType) || null;
+    }
 
     private getRetryCount(event: EventMessage): number {
         const headers = event.properties?.headers;

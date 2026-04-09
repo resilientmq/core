@@ -1,3 +1,40 @@
+# [2.3.0] - 2026-04-09
+
+### Added
+
+- **Publisher lane isolation**: Added dedicated pending/retry connection lane with new config options:
+  - `separatePendingConnections?: boolean` (default: `true`)
+  - `pendingMaxConnections?: number` (default: `maxConnections`)
+- **Adaptive pending tuning config**: Added runtime tuning knobs for EWMA-based concurrency adaptation:
+  - `pendingAdaptiveConcurrency?: boolean` (default: `true`)
+  - `pendingAdaptiveEwmaAlpha?: number` (default: `0.2`)
+  - `pendingAdaptiveTargetLatencyMs?: number`
+  - `pendingAdaptiveErrorThresholdSoft?: number` (default: `0.08`)
+  - `pendingAdaptiveErrorThresholdHard?: number` (default: `0.2`)
+- **EventStore contract**: Added optional `saveEventIfNotExists(event): Promise<boolean>` for single-write idempotent persistence.
+
+### Changed
+
+- **Publisher idempotency path**: Publisher now automatically prefers `saveEventIfNotExists` when implemented by the store; otherwise it falls back to `getEvent + saveEvent`.
+- **Pending events throughput path**:
+  - Added lane-aware broker connect/reconnect handling for realtime vs pending traffic.
+  - Replaced active-promise array races with a shared completion signal to reduce allocations in hot loops.
+  - Added faster flush strategy and reduced per-iteration overhead in status updates.
+- **Adaptive concurrency behavior**: Upgraded from simple recent-count heuristics to EWMA-based latency + error-rate adaptation with configurable thresholds.
+
+### Fixed
+
+- **Publisher slot waiting robustness**: Prevented stale timed-out waiters from accumulating in pending slot queue under contention.
+- **Validation hardening**: Added strict config validation for adaptive tuning parameters (alpha/threshold/latency constraints).
+
+### Testing
+
+- Expanded unit coverage for publisher with new scenarios:
+  - dedicated pending pool on/off behavior
+  - adaptive config validation failures
+  - pending slot waiter cleanup regression
+- Current unit coverage remains at maximum for covered source set (`100%` lines/statements/functions/branches).
+
 # [2.2.4] - 2026-04-09
 
 ### Added

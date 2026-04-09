@@ -75,6 +75,21 @@ export class EventStoreMock implements EventStore {
         this.events.set(event.messageId, { ...event });
     }
 
+    async saveEventIfNotExists(event: EventMessage): Promise<boolean> {
+        this.incrementCallCount('saveEventIfNotExists');
+
+        if (this.failOnSave) {
+            throw new Error('EventStore: saveEventIfNotExists failed (simulated)');
+        }
+
+        if (this.events.has(event.messageId)) {
+            return false;
+        }
+
+        this.events.set(event.messageId, { ...event });
+        return true;
+    }
+
     async updateEventStatus(
         event: EventMessage,
         status: EventConsumeStatus | EventPublishStatus

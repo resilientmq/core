@@ -70,6 +70,13 @@ This package contains the **runtime logic** for publishing and consuming resilie
 - Custom logger
 - Full TypeScript support
 
+### v2.3.0 Highlights
+
+- Publisher lane isolation: realtime publish lane and pending/retry lane can run on separate RabbitMQ pools.
+- Automatic idempotent persistence path when your store implements `saveEventIfNotExists`.
+- EWMA-based adaptive pending concurrency (latency + error-rate) with configurable thresholds.
+- Expanded unit-test coverage for publisher architecture and adaptive controls.
+
 ---
 
 ## 🧩 Main Concepts
@@ -102,7 +109,7 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `deadLetterQueue.options`  | `AssertQueueOptions`        | ❌ | DLQ queue options                  | durable |
 | `deadLetterQueue.exchange` | `ExchangeConfig`            | ❌ | DLQ exchange                       | name, type, routingKey, options |
 | `eventsToProcess`          | `EventProcessConfig[]`      | ✅ | List of handled event types        | type, handler |
-| `store`                    | `EventStore`                | ❌ | Persistent layer for events        | saveEvent, getEvent, updateEventStatus, deleteEvent, getPendingEvents (optional), batchUpdateEventStatus (optional) |
+| `store`                    | `EventStore`                | ❌ | Persistent layer for events        | saveEvent, saveEventIfNotExists (optional), getEvent, updateEventStatus, deleteEvent, getPendingEvents (optional), batchUpdateEventStatus (optional) |
 | `storeConnectionRetries`   | `number`                    | ❌ | Max retry attempts for store connection (default: 3) | – |
 | `storeConnectionRetryDelayMs` | `number`                 | ❌ | Delay between store retry attempts in ms (default: 1000) | – |
 | `cleanupConsumerPrefetch`   | `number`                    | ❌ | Prefetch for secondary cleanup connection used when `ignoreUnknownEvents` is true (default: 500, set `0` to disable) | – |
@@ -126,14 +133,23 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `pendingEventsCheckIntervalMs` | `number` | ❌ | Interval to check and send pending events (ms). Only effective when `instantPublish` is false |
 | `maxConcurrentPublishes` | `number` | ❌ | Global backpressure limit for concurrent publish operations (default: `100`) |
 | `maxConnections` | `number` | ❌ | Number of RabbitMQ connections in the pool for load distribution (default: `1`) |
+| `separatePendingConnections` | `boolean` | ❌ | Use a dedicated connection pool for pending/retry publishing (default: `true`) |
+| `pendingMaxConnections` | `number` | ❌ | Connection count for pending/retry lane when separated (default: `maxConnections`) |
 | `pendingEventsBatchSize` | `number` | ❌ | Default number of pending events fetched per batch when calling `processPendingEvents()` |
 | `pendingEventsMaxPublishesPerSecond` | `number` | ❌ | Default max number of pending events dispatched per second during `processPendingEvents()` |
 | `pendingEventsMaxConcurrentPublishes` | `number` | ❌ | Default max number of pending events published in parallel during `processPendingEvents()` |
+| `pendingAdaptiveConcurrency` | `boolean` | ❌ | Enable adaptive pending concurrency control (default: `true`) |
+| `pendingAdaptiveEwmaAlpha` | `number` | ❌ | EWMA alpha for adaptive signals, range `(0,1]` (default: `0.2`) |
+| `pendingAdaptiveTargetLatencyMs` | `number` | ❌ | Optional latency target for adaptive scaling (ms) |
+| `pendingAdaptiveErrorThresholdSoft` | `number` | ❌ | Soft EWMA error-rate threshold for gradual backoff (default: `0.08`) |
+| `pendingAdaptiveErrorThresholdHard` | `number` | ❌ | Hard EWMA error-rate threshold for aggressive backoff (default: `0.2`) |
 | `storeConnectionRetries` | `number` | ❌ | Max retry attempts for store connection (default: 3) |
 | `storeConnectionRetryDelayMs` | `number` | ❌ | Delay between store retry attempts in ms (default: 1000) |
 | `metricsEnabled` | `boolean` | ❌ | Enable runtime metrics collection for the publisher |
 
 **Note**: When `instantPublish` is set to `false`, a `store` with `getPendingEvents()` method is **REQUIRED**.
+
+**Idempotency optimization**: If your store implements `saveEventIfNotExists(event): Promise<boolean>`, publisher automatically uses that single-write path; otherwise it falls back to `getEvent + saveEvent`.
 
 ---
 ## 🧩 Custom Event Storage Format
@@ -299,8 +315,16 @@ const publisher = new ResilientEventPublisher({
   store: myEventStore,
   // Check for pending events every 30 seconds
   pendingEventsCheckIntervalMs: 30000,
-  // Use multiple connections for better throughput
-  maxConnections: 3
+  // Realtime lane pool
+  maxConnections: 3,
+  // Dedicated pending/retry lane pool (default true)
+  separatePendingConnections: true,
+  pendingMaxConnections: 2,
+  // Adaptive pending concurrency tuning (all optional)
+  pendingAdaptiveConcurrency: true,
+  pendingAdaptiveEwmaAlpha: 0.2,
+  pendingAdaptiveErrorThresholdSoft: 0.08,
+  pendingAdaptiveErrorThresholdHard: 0.2
 });
 
 // Store event for later delivery (e.g., when offline)
@@ -327,8 +351,9 @@ publisher.stopPendingEventsCheck();
 - **`processPendingEvents()`**: Manually trigger processing of pending events
 - **`stopPendingEventsCheck()`**: Stop the periodic check for graceful shutdown
 - **`maxConnections`**: Distribute load across multiple RabbitMQ connections (round-robin)
-- Events are automatically sorted and sent in chronological order (oldest first)
-- Only connects to RabbitMQ when there are actually pending events to process
+- **`separatePendingConnections` + `pendingMaxConnections`**: Isolate realtime vs pending/retry traffic at connection level
+- Events are processed in the order returned by your store (implement sorting there if needed)
+- Only connects pending lane when there are pending events to process
 
 ### ⚡ Pending Events Processing with Rate Limiting (v2.1.5+)
 
@@ -459,37 +484,26 @@ async batchUpdateEventStatus(
 
 ## 📊 Metrics
 
-`ResilientConsumer` and `ResilientEventPublisher` support optional real-time metrics collection.
+`ResilientEventPublisher` supports optional real-time metrics collection.
 Enable it with `metricsEnabled: true` in the config, then call `getMetrics()` at any time to get
 a snapshot.
 
 ```ts
 import { ResilientConsumer, ResilientEventPublisher } from '@resilientmq/core';
 
-// Consumer with metrics
+// Consumer (metrics are disabled in runtime for minimal overhead)
 const consumer = new ResilientConsumer({
   connection: 'amqp://localhost',
   consumeQueue: { queue: 'my.queue' },
   eventsToProcess: [{ type: 'order.created', handler: async (e) => { /* ... */ } }],
-  metricsEnabled: true,   // <-- enable metrics
+  metricsEnabled: true,
 });
 
 await consumer.start();
 
-// Inspect metrics at any time
+// Consumer runtime returns undefined for metrics by design
 const snap = consumer.getMetrics();
-console.log(snap);
-// {
-//   messagesReceived: 142,
-//   messagesProcessed: 140,
-//   messagesRetried: 3,
-//   messagesFailed: 2,
-//   messagesSentToDLQ: 2,
-//   messagesPublished: 0,
-//   processingErrors: 2,
-//   avgProcessingTimeMs: 18.4,
-//   lastActivityAt: 2026-03-16T10:23:45.000Z
-// }
+console.log(snap); // undefined
 ```
 
 ```ts
@@ -544,7 +558,7 @@ metrics.reset(); // reset all counters
 
 | Test Type | Purpose | Execution Time | Coverage |
 |-----------|---------|----------------|----------|
-| **Unit Tests** | Fast, isolated component testing with mocks | < 30s | 70%+ code coverage |
+| **Unit Tests** | Fast, isolated component testing with mocks | < 30s | 70%+ code coverage (current suite at 100% for covered source set) |
 | **Integration Tests** | End-to-end testing with real RabbitMQ | < 5min | Full integration scenarios |
 | **Stress Tests** | High-volume and high-speed load testing | < 10min | Resilience validation |
 | **Benchmarks** | Performance measurement and regression detection | < 15min | Throughput & latency metrics |

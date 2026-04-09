@@ -15,6 +15,17 @@ export interface EventStore {
     saveEvent(event: EventMessage): Promise<void>;
 
     /**
+     * Persists a new event only if it does not already exist.
+     *
+     * Returns `true` when the event was inserted, `false` when an event with the
+     * same identity already exists.
+     *
+     * This method is optional. When implemented, publishers can skip the
+     * pre-read (`getEvent`) and perform a single idempotent write.
+     */
+    saveEventIfNotExists?(event: EventMessage): Promise<boolean>;
+
+    /**
      * Updates the status of an event, such as marking it as `DONE` or `RETRY`.
      *
      * @param event - The event message containing the ID to search for.

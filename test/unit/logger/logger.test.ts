@@ -1,4 +1,4 @@
-import { log, setLogLevel, setLogTimestamps } from '../../../src/logger/logger';
+import { log, setLogLevel, setLogSampleRate, setLogSampling, setLogTimestamps } from '../../../src/logger/logger';
 
 describe('Logger', () => {
     let consoleErrorSpy: jest.SpyInstance;
@@ -16,6 +16,7 @@ describe('Logger', () => {
         // Reset to default state
         setLogLevel('info');
         setLogTimestamps(true);
+        setLogSampling({ error: 1, warn: 1, info: 1, debug: 1 });
     });
 
     afterEach(() => {
@@ -220,6 +221,53 @@ describe('Logger', () => {
             log('info', message);
 
             expect(consoleInfoSpy).toHaveBeenCalledWith(message);
+        });
+    });
+
+    describe('sampling', () => {
+        beforeEach(() => {
+            setLogLevel('debug');
+            setLogTimestamps(false);
+            setLogSampling({ error: 1, warn: 1, info: 1, debug: 1 });
+        });
+
+        it('should log all messages when sampling is 1', () => {
+            setLogSampleRate('info', 1);
+
+            log('info', 'm1');
+            log('info', 'm2');
+            log('info', 'm3');
+
+            expect(consoleInfoSpy).toHaveBeenCalledTimes(3);
+        });
+
+        it('should sample info logs when sampling is greater than 1', () => {
+            setLogSampleRate('info', 3);
+
+            for (let i = 0; i < 10; i++) {
+                log('info', `msg-${i}`);
+            }
+
+            expect(consoleInfoSpy).toHaveBeenCalledTimes(4);
+        });
+
+        it('should reset sampling counter when sample rate changes', () => {
+            setLogSampleRate('info', 3);
+            log('info', 'a');
+            log('info', 'b');
+
+            setLogSampleRate('info', 2);
+            log('info', 'c');
+
+            expect(consoleInfoSpy).toHaveBeenCalledTimes(2);
+        });
+
+        it('should normalize invalid sample rates to 1', () => {
+            setLogSampleRate('debug', 0 as any);
+            log('debug', 'd1');
+            log('debug', 'd2');
+
+            expect(consoleLogSpy).toHaveBeenCalledTimes(2);
         });
     });
 });

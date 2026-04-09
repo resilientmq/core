@@ -2,6 +2,7 @@ import { ResilientConsumer } from '../../../src/resilience/resilient-consumer';
 import { EventStoreMock } from '../../utils/event-store-mock';
 import { AMQPLibMock } from '../../utils/amqplib-mock';
 import { ResilientConsumerConfig } from '../../../src/types';
+import { EventConsumeStatus } from '../../../src/types/enum/event-consume-status';
 
 // Mock amqplib
 jest.mock('amqplib', () => {
@@ -12,7 +13,8 @@ jest.mock('amqplib', () => {
 });
 
 jest.mock('../../../src/logger/logger', () => ({
-    log: jest.fn()
+    log: jest.fn(),
+    isLogLevelEnabled: jest.fn().mockReturnValue(true),
 }));
 
 // Mock the AmqpQueue to avoid real connections
@@ -1141,21 +1143,18 @@ describe('ResilientConsumer', () => {
             expect(checkStoreSpy).toHaveBeenCalled();
         });
 
-        it('should use default cleanup consumer prefetch of 500', async () => {
+        it('should not force single-active-consumer by default for main queue', async () => {
             const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
-            const connectCalls: number[] = [];
+            const mockAssertQueue = jest.fn().mockResolvedValue({ queue: 'test.queue' });
 
             AmqpQueue.mockImplementation(() => ({
-                connect: jest.fn().mockImplementation(async (prefetch: number) => {
-                    connectCalls.push(prefetch);
-                }),
+                connect: jest.fn().mockResolvedValue(undefined),
                 consume: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
                 cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockResolvedValue(undefined),
                 channel: {
-                    get: jest.fn().mockResolvedValue(null),
-                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertQueue: mockAssertQueue,
                     assertExchange: jest.fn().mockResolvedValue({}),
                     bindQueue: jest.fn().mockResolvedValue({}),
                     consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
@@ -1165,31 +1164,28 @@ describe('ResilientConsumer', () => {
                 closed: false
             }));
 
-            config.ignoreUnknownEvents = true;
-            delete (config as any).cleanupConsumerPrefetch;
-
             consumer = new ResilientConsumer(config);
             await consumer.start();
 
-            expect(connectCalls).toContain(10);   // main consumer prefetch
-            expect(connectCalls).toContain(500);  // cleanup consumer default prefetch
+            expect(mockAssertQueue).toHaveBeenCalledWith('test.queue', expect.objectContaining({
+                arguments: expect.not.objectContaining({
+                    'x-single-active-consumer': expect.anything(),
+                }),
+            }));
         });
 
-        it('should disable cleanup consumer when cleanupConsumerPrefetch is 0', async () => {
+        it('should preserve explicit single-active-consumer value from queue arguments', async () => {
             const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
-            const connectCalls: number[] = [];
+            const mockAssertQueue = jest.fn().mockResolvedValue({ queue: 'test.queue' });
 
             AmqpQueue.mockImplementation(() => ({
-                connect: jest.fn().mockImplementation(async (prefetch: number) => {
-                    connectCalls.push(prefetch);
-                }),
+                connect: jest.fn().mockResolvedValue(undefined),
                 consume: jest.fn().mockResolvedValue(undefined),
                 disconnect: jest.fn().mockResolvedValue(undefined),
                 cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
                 publish: jest.fn().mockResolvedValue(undefined),
                 channel: {
-                    get: jest.fn().mockResolvedValue(null),
-                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertQueue: mockAssertQueue,
                     assertExchange: jest.fn().mockResolvedValue({}),
                     bindQueue: jest.fn().mockResolvedValue({}),
                     consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
@@ -1199,13 +1195,97 @@ describe('ResilientConsumer', () => {
                 closed: false
             }));
 
-            config.ignoreUnknownEvents = true;
-            (config as any).cleanupConsumerPrefetch = 0;
+            config.consumeQueue.options = {
+                ...(config.consumeQueue.options ?? {}),
+                arguments: {
+                    ...(config.consumeQueue.options?.arguments ?? {}),
+                    'x-single-active-consumer': false,
+                },
+            };
 
             consumer = new ResilientConsumer(config);
             await consumer.start();
 
-            expect(connectCalls).toEqual([10]); // only main consumer connects
+            expect(mockAssertQueue).toHaveBeenCalledWith('test.queue', expect.objectContaining({
+                arguments: expect.objectContaining({
+                    'x-single-active-consumer': false,
+                }),
+            }));
+        });
+
+        it('should apply singleActiveConsumer flag when configured', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            const mockAssertQueue = jest.fn().mockResolvedValue({ queue: 'test.queue' });
+
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    assertQueue: mockAssertQueue,
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            config.singleActiveConsumer = true;
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            expect(mockAssertQueue).toHaveBeenCalledWith('test.queue', expect.objectContaining({
+                arguments: expect.objectContaining({
+                    'x-single-active-consumer': true,
+                }),
+            }));
+        });
+
+        it('should throttle repeated store reconnection checks when disconnected', async () => {
+            const consumeMock = jest.fn().mockResolvedValue(undefined);
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: consumeMock,
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            config.storeConnectionRetryDelayMs = 2000;
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            const checkStoreSpy = jest.spyOn(consumer as any, 'checkStoreConnection').mockResolvedValue(undefined);
+            (consumer as any).storeConnected = false;
+
+            const consumeCallback = consumeMock.mock.calls[0][1];
+            const testEvent = {
+                messageId: 'evt-throttle-1',
+                type: 'test.event',
+                payload: { data: 'test' },
+                status: EventConsumeStatus.RECEIVED,
+                properties: { headers: {} }
+            };
+
+            await expect(consumeCallback(testEvent)).resolves.toBeUndefined();
+            await expect(consumeCallback({ ...testEvent, messageId: 'evt-throttle-2' })).rejects.toThrow('Store reconnect throttled');
+
+            expect(checkStoreSpy).toHaveBeenCalledTimes(1);
         });
     });
 });

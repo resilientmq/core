@@ -100,9 +100,48 @@ describe('ResilientEventPublisher', () => {
                 publisher = new ResilientEventPublisher(config);
             }).toThrow('Configuration error: either "queue" or "exchange" must be configured');
         });
+
+        it('should throw error when pendingAdaptiveEwmaAlpha is out of range', () => {
+            config.pendingAdaptiveEwmaAlpha = 0;
+
+            expect(() => {
+                publisher = new ResilientEventPublisher(config);
+            }).toThrow('Configuration error: "pendingAdaptiveEwmaAlpha" must be > 0 and <= 1');
+        });
+
+        it('should throw error when pendingAdaptiveErrorThresholdHard is below soft threshold', () => {
+            config.pendingAdaptiveErrorThresholdSoft = 0.2;
+            config.pendingAdaptiveErrorThresholdHard = 0.1;
+
+            expect(() => {
+                publisher = new ResilientEventPublisher(config);
+            }).toThrow('Configuration error: "pendingAdaptiveErrorThresholdHard" must be >= "pendingAdaptiveErrorThresholdSoft"');
+        });
+
+        it('should throw error when pendingAdaptiveTargetLatencyMs is not positive', () => {
+            config.pendingAdaptiveTargetLatencyMs = 0;
+
+            expect(() => {
+                publisher = new ResilientEventPublisher(config);
+            }).toThrow('Configuration error: "pendingAdaptiveTargetLatencyMs" must be > 0');
+        });
     });
 
     describe('publish', () => {
+        it('should use idempotent save fast path when available', async () => {
+            publisher = new ResilientEventPublisher(config);
+
+            const getEventSpy = jest.spyOn(mockStore, 'getEvent');
+            const saveIfNotExistsSpy = jest.spyOn(mockStore, 'saveEventIfNotExists');
+
+            await publisher.publish(testEvent);
+            await publisher.publish(testEvent);
+
+            expect(saveIfNotExistsSpy).toHaveBeenCalledTimes(2);
+            expect(getEventSpy).not.toHaveBeenCalled();
+            expect(mockStore.getCallCount('saveEvent')).toBe(0);
+        });
+
         it('should check for duplicate events before publishing', async () => {
             publisher = new ResilientEventPublisher(config);
 
@@ -111,7 +150,8 @@ describe('ResilientEventPublisher', () => {
             // Try to publish same event again
             await publisher.publish(testEvent);
 
-            expect(mockStore.getCallCount('saveEvent')).toBe(1);
+            expect(mockStore.getCallCount('saveEventIfNotExists')).toBe(2);
+            expect(mockStore.getCallCount('saveEvent')).toBe(0);
         });
 
         it('should save event to store before publishing', async () => {
@@ -119,7 +159,7 @@ describe('ResilientEventPublisher', () => {
 
             await publisher.publish(testEvent);
 
-            expect(mockStore.getCallCount('saveEvent')).toBe(1);
+            expect(mockStore.getCallCount('saveEventIfNotExists')).toBe(1);
             const savedEvent = await mockStore.getEvent(testEvent);
             expect(savedEvent).toBeDefined();
         });
@@ -179,6 +219,58 @@ describe('ResilientEventPublisher', () => {
 
             // Test passes if no error is thrown
             expect(true).toBe(true);
+        });
+
+        it('should use a dedicated pending connection pool by default', async () => {
+            config.instantPublish = false;
+            const instances: any[] = [];
+
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => {
+                const instance = {
+                    connect: jest.fn().mockResolvedValue(undefined),
+                    disconnect: jest.fn().mockResolvedValue(undefined),
+                    forceClose: jest.fn().mockResolvedValue(undefined),
+                    publish: jest.fn().mockResolvedValue(undefined),
+                    closed: false
+                };
+                instances.push(instance);
+                return instance;
+            });
+
+            publisher = new ResilientEventPublisher(config);
+            await publisher.publish(testEvent, { storeOnly: true });
+            await publisher.processPendingEvents();
+
+            expect((publisher as any).pendingConnectionPool).toBeDefined();
+            expect((publisher as any).pendingConnectionPool.length).toBeGreaterThan(0);
+            expect(instances.length).toBeGreaterThan(1);
+        });
+
+        it('should reuse primary pool when separatePendingConnections is disabled', async () => {
+            config.instantPublish = false;
+            config.separatePendingConnections = false;
+            const instances: any[] = [];
+
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => {
+                const instance = {
+                    connect: jest.fn().mockResolvedValue(undefined),
+                    disconnect: jest.fn().mockResolvedValue(undefined),
+                    forceClose: jest.fn().mockResolvedValue(undefined),
+                    publish: jest.fn().mockResolvedValue(undefined),
+                    closed: false
+                };
+                instances.push(instance);
+                return instance;
+            });
+
+            publisher = new ResilientEventPublisher(config);
+            await publisher.publish(testEvent, { storeOnly: true });
+            await publisher.processPendingEvents();
+
+            expect((publisher as any).pendingConnectionPool).toBeUndefined();
+            expect(instances.length).toBe(1);
         });
 
         it('should process all pending events', async () => {
@@ -877,7 +969,31 @@ describe('ResilientEventPublisher', () => {
             const event2 = { ...testEvent, messageId: 'msg-wait' };
             await publisher.publish(event2);
 
-            expect(mockStore.getCallCount('saveEvent')).toBeGreaterThan(0);
+            expect(mockStore.getCallCount('saveEventIfNotExists')).toBeGreaterThan(0);
+            jest.useFakeTimers();
+        });
+
+        it('should not keep stale pending slot waiters after fallback timeout wakeup', async () => {
+            jest.useRealTimers();
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                closed: false
+            }));
+
+            publisher = new ResilientEventPublisher(config);
+            (publisher as any).pendingOperations = (publisher as any).maxConcurrentPublishes;
+
+            setTimeout(() => {
+                (publisher as any).pendingOperations = 0;
+            }, 30);
+
+            const event2 = { ...testEvent, messageId: 'msg-waiter-cleanup' };
+            await publisher.publish(event2);
+
+            expect((publisher as any).pendingSlotWaiters.length).toBe(0);
             jest.useFakeTimers();
         });
     });
