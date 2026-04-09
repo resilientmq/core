@@ -11,5 +11,6 @@ export function applyMiddleware(
         }
         return middlewares[index](context, () => compose(index + 1));
     };
+    
     return compose(0);
 }

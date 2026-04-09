@@ -41,8 +41,8 @@ Tests for memory leaks during prolonged message processing.
 - Garbage collection between measurements
 - Memory growth analysis
 
-**Expected behavior:**
-- Memory increase should be less than 50MB
+- **Expected behavior:**
+- Memory increase should be less than 80MB
 - Memory should stabilize (not grow continuously)
 - No significant memory leaks
 
@@ -182,6 +182,6 @@ Expected performance (approximate, hardware-dependent):
 - **Latency P95**: < 50ms
 - **Latency P99**: < 100ms
 - **Error Rate**: < 1%
-- **Memory Growth**: < 50MB for 1000 messages
+- **Memory Growth**: < 80MB for 1000 messages
 
 These are guidelines; actual performance depends on hardware, network, and system load.

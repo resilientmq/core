@@ -139,7 +139,6 @@ jobs:
     name: Stress Tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    needs: [unit-tests, integration-tests]
 
     services:
       rabbitmq:
@@ -213,7 +212,6 @@ jobs:
     name: Performance Benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [unit-tests, integration-tests]
 
     services:
       rabbitmq:
