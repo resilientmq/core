@@ -133,15 +133,25 @@ if (!fs.existsSync(testResultsDir)) {
 
 // Handle unhandled promise rejections and uncaught exceptions
 // This prevents tests from crashing due to connection errors
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Don't exit the process, just log the error
-});
+const processListenersInitializedFlag = '__RESILIENTMQ_TEST_PROCESS_LISTENERS__';
+const globalForProcessListeners = globalThis as any;
 
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  // Don't exit the process, just log the error
-});
+if (!globalForProcessListeners[processListenersInitializedFlag]) {
+  // Many suites create temporary listeners; increase this only for test process.
+  process.setMaxListeners(Math.max(process.getMaxListeners(), 50));
+
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    // Don't exit the process, just log the error
+  });
+
+  process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    // Don't exit the process, just log the error
+  });
+
+  globalForProcessListeners[processListenersInitializedFlag] = true;
+}
 
 // Export for use in tests
 declare global {

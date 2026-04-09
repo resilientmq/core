@@ -443,6 +443,20 @@ describe('ResilientEventConsumeProcessor', () => {
             expect(savedEvent?.status).toBe(EventConsumeStatus.DONE);
         });
 
+        it('should discard unknown events immediately when ignoreUnknownEvents is enabled', async () => {
+            const handler = jest.fn();
+            config.ignoreUnknownEvents = true;
+            config.eventsToProcess = [{ type: 'other.event', handler }];
+            processor = new ResilientEventConsumeProcessor(config);
+
+            await expect(processor.process(testEvent)).rejects.toThrow('Unknown event type: test.event');
+
+            expect(handler).not.toHaveBeenCalled();
+            expect(mockStore.getCallCount('saveEvent')).toBe(0);
+            expect(mockStore.getCallCount('updateEventStatus')).toBe(0);
+            expect(mockBroker.publish).not.toHaveBeenCalled();
+        });
+
 
 
         it('should work without store configured', async () => {

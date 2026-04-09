@@ -24,7 +24,7 @@ describe('Integration: Retry and DLQ Comprehensive Tests', () => {
     }, 60000);
 
     afterAll(async () => {
-        await rabbitMQHelpers.disconnect();
+        await rabbitMQHelpers?.disconnect?.();
         await containerManager.stopAll();
     }, 30000);
 
@@ -48,8 +48,8 @@ describe('Integration: Retry and DLQ Comprehensive Tests', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
-        publisherStore.clear();
+        store?.clear();
+        publisherStore?.clear();
     });
 
     describe('Without Retry or DLQ', () => {

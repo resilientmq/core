@@ -52,7 +52,7 @@ describe('Integration: Resource Cleanup Validation', () => {
         // Assert - Connection should be closed
         expect(queue.closed).toBe(true);
         
-        store.clear();
+        store?.clear();
     }, 30000);
 
     it('should properly cleanup publisher connections in afterEach', async () => {
@@ -82,7 +82,7 @@ describe('Integration: Resource Cleanup Validation', () => {
         const interval = (publisher as any).pendingEventsInterval;
         expect(interval).toBeUndefined();
 
-        store.clear();
+        store?.clear();
     }, 30000);
 
     it('should cleanup event store between tests', async () => {
@@ -107,7 +107,7 @@ describe('Integration: Resource Cleanup Validation', () => {
         expect(allEvents.length).toBe(2);
 
         // Cleanup
-        store.clear();
+        store?.clear();
 
         // Assert - Store should be empty
         allEvents = store.getAllEvents();
@@ -150,7 +150,7 @@ describe('Integration: Resource Cleanup Validation', () => {
         // This validates that cleanup properly stops all background processes
         expect(true).toBe(true); // Test passes if no hanging processes
 
-        store.clear();
+        store?.clear();
     }, 30000);
 
     it('should handle cleanup errors gracefully', async () => {
@@ -183,7 +183,7 @@ describe('Integration: Resource Cleanup Validation', () => {
         // The important thing is that the test doesn't crash
         expect(cleanupError).toBeNull();
 
-        store.clear();
+        store?.clear();
     }, 30000);
 
     it('should verify all integration tests follow cleanup pattern', () => {

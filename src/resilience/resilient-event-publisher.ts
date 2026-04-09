@@ -45,7 +45,8 @@ export class ResilientEventPublisher {
             this.metrics = new MetricsCollector();
         }
 
-        if (this.config.store) {
+        const store = this.config.store;
+        if (store) {
             try {
                 const connectionCheck = this.checkStoreConnection();
                 connectionCheck.catch(error => {
@@ -68,6 +69,7 @@ export class ResilientEventPublisher {
     }
 
     async publish(event: EventMessage, options?: { storeOnly?: boolean }): Promise<void> {
+        const metrics = this.metrics;
         while (this.pendingOperations >= this.maxConcurrentPublishes) {
             await this.sleep(10);
         }
@@ -102,13 +104,13 @@ export class ResilientEventPublisher {
                     await store.updateEventStatus(event, EventPublishStatus.PUBLISHED);
                 }
 
-                this.metrics?.increment('messagesPublished');
+                metrics?.increment('messagesPublished');
                 log('info', `[Publisher] Published ${event.messageId}`);
             } else {
                 log('debug', `[Publisher] Stored ${event.messageId} for later delivery`);
             }
         } catch (error) {
-            this.metrics?.increment('processingErrors');
+            metrics?.increment('processingErrors');
             log('error', `[Publisher] Failed to publish ${event.messageId}`, error);
 
             if (this.config.store) {
@@ -124,12 +126,13 @@ export class ResilientEventPublisher {
     }
 
     async processPendingEvents(options: ProcessPendingEventsOptions = {}): Promise<void> {
-        if (!this.config.store) {
+        const store = this.config.store;
+        if (!store) {
             log('warn', '[Publisher] Cannot process pending events: no store configured');
             return;
         }
 
-        if (!this.config.store.getPendingEvents) {
+        if (!store.getPendingEvents) {
             throw new Error('Store must implement getPendingEvents() method');
         }
 
@@ -163,7 +166,7 @@ export class ResilientEventPublisher {
             while (true) {
                 batchNumber++;
 
-                const rawResult = await this.config.store.getPendingEvents(EventPublishStatus.PENDING, batchSize);
+                const rawResult = await store.getPendingEvents(EventPublishStatus.PENDING, batchSize);
                 const pendingEvents: EventMessage[] = Array.isArray(rawResult)
                     ? rawResult
                     : Array.from(rawResult as Iterable<EventMessage>);
@@ -250,7 +253,8 @@ export class ResilientEventPublisher {
     }
 
     private async connect(): Promise<void> {
-        if (this.connected && !this.connectionPool.some(q => q.closed)) {
+        const pool = this.connectionPool;
+        if (this.connected && !pool.some(q => q.closed)) {
             return;
         }
 
@@ -262,7 +266,7 @@ export class ResilientEventPublisher {
         this.connectPromise = (async () => {
             // Connect all connections in the pool
             await Promise.all(
-                this.connectionPool.map(queue => queue.connect())
+                pool.map(queue => queue.connect())
             );
             this.connected = true;
             this.lastPublishTime = Date.now();
@@ -312,6 +316,7 @@ export class ResilientEventPublisher {
     }
 
     private startPendingEventsCheck(): void {
+        const intervalMs = this.config.pendingEventsCheckIntervalMs;
         this.pendingEventsInterval = setInterval(() => {
             if (this.isProcessingPending) {
                 return;
@@ -320,28 +325,30 @@ export class ResilientEventPublisher {
             this.processPendingEvents().catch(error =>
                 log('error', '[Publisher] Error during periodic pending events check', error)
             );
-        }, this.config.pendingEventsCheckIntervalMs);
+        }, intervalMs);
     }
 
     private async publishToBroker(event: EventMessage): Promise<void> {
-        const destination = this.config.queue ?? this.config.exchange!.name;
+        const { queue: configuredQueue, exchange } = this.config;
+        const destination = configuredQueue ?? exchange!.name;
 
         await this.connect();
         this.resetIdleTimer();
 
         // Get next connection from pool (round-robin)
-        const queue = this.getNextConnection();
+        const brokerConnection = this.getNextConnection();
+        const publishOptions = { exchange };
 
         try {
-            await queue.publish(destination, event, { exchange: this.config.exchange });
+            await brokerConnection.publish(destination, event, publishOptions);
             this.resetIdleTimer();
         } catch (error) {
             if (!this.isRecoverableChannelError(error)) {
                 throw error;
             }
 
-            await this.recoverBrokerConnection(queue);
-            await queue.publish(destination, event, { exchange: this.config.exchange });
+            await this.recoverBrokerConnection(brokerConnection);
+            await brokerConnection.publish(destination, event, publishOptions);
             this.resetIdleTimer();
         }
     }

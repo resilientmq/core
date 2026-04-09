@@ -16,19 +16,20 @@ export async function handleDLQ(
 ) {
     if (dlq?.queue && dlq.exchange) {
         log('warn', `[DLQ] Sending message ${event.messageId} to dead letter queue`);
+        const headers = event.properties?.headers;
 
         // Crear headers con información del error similar a RabbitMQ
         /* istanbul ignore next */
         const errorHeaders = {
-            'x-first-death-exchange': event.properties?.headers?.['x-first-death-exchange'] || event.properties?.headers?.['x-original-exchange'] || '',
-            'x-first-death-queue': event.properties?.headers?.['x-first-death-queue'] || originalQueue || '',
-            'x-first-death-routing-key': event.properties?.headers?.['x-first-death-routing-key'] || event.properties?.headers?.['x-original-routing-key'] || '',
+            'x-first-death-exchange': headers?.['x-first-death-exchange'] || headers?.['x-original-exchange'] || '',
+            'x-first-death-queue': headers?.['x-first-death-queue'] || originalQueue || '',
+            'x-first-death-routing-key': headers?.['x-first-death-routing-key'] || headers?.['x-original-routing-key'] || '',
             'x-first-death-reason': 'rejected',
             'x-death-reason': error ? 'rejected' : 'expired',
             'x-death-count': attempts || 1,
             'x-death-time': new Date().toISOString(),
-            'x-original-exchange': event.properties?.headers?.['x-original-exchange'] || '',
-            'x-original-routing-key': event.properties?.headers?.['x-original-routing-key'] || '',
+            'x-original-exchange': headers?.['x-original-exchange'] || '',
+            'x-original-routing-key': headers?.['x-original-routing-key'] || '',
             'x-original-queue': originalQueue || '',
         } as any;
 
@@ -46,7 +47,7 @@ export async function handleDLQ(
                 ...event.properties,
                 headers: {
                     /* istanbul ignore next */
-                    ...event.properties?.headers,
+                    ...headers,
                     ...errorHeaders
                 }
             }

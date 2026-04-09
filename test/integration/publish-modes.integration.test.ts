@@ -20,7 +20,7 @@ describe('Integration: Publish Modes (Instant vs Deferred)', () => {
     }, 60000);
 
     afterAll(async () => {
-        await rabbitMQHelpers.disconnect();
+        await rabbitMQHelpers?.disconnect?.();
         await containerManager.stopAll();
     }, 30000);
 
@@ -36,7 +36,7 @@ describe('Integration: Publish Modes (Instant vs Deferred)', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
+        store?.clear();
     });
 
     describe('Instant Publish (instantPublish: true)', () => {

@@ -34,7 +34,7 @@ describe('Integration: DLQ Loop Prevention (hard guard)', () => {
     }, 60000);
 
     afterAll(async () => {
-        await rabbitMQHelpers.disconnect();
+        await rabbitMQHelpers?.disconnect?.();
         await containerManager.stopAll();
     }, 30000);
 
@@ -58,8 +58,8 @@ describe('Integration: DLQ Loop Prevention (hard guard)', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
-        publisherStore.clear();
+        store?.clear();
+        publisherStore?.clear();
     });
 
     it('should ACK message (not loop) when sendToDlqOrDiscard fails in hard guard', async () => {

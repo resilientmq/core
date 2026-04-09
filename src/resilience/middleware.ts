@@ -5,10 +5,11 @@ export function applyMiddleware(
     context: EventMessage,
     handler: () => Promise<void>
 ): Promise<void> {
-    const compose = (mw: Middleware[], ctx: EventMessage, next: () => Promise<void>): Promise<void> => {
-        if (mw.length === 0) return next();
-        const [first, ...rest] = mw;
-        return first(ctx, () => compose(rest, ctx, next));
+    const compose = (index: number): Promise<void> => {
+        if (index >= middlewares.length) {
+            return handler();
+        }
+        return middlewares[index](context, () => compose(index + 1));
     };
-    return compose(middlewares, context, handler);
+    return compose(0);
 }

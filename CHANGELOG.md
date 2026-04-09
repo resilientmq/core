@@ -1,3 +1,25 @@
+# [2.2.3] - 2026-04-09
+
+### Changed
+
+- **Core performance (no logic change)**: Applied low-risk micro-optimizations across core modules to reduce repeated lookups and allocations in hot paths.
+  - `ResilientConsumer`, `ResilientEventConsumeProcessor`, `ResilientEventPublisher`, `AmqpQueue`, `DLQ handler`, `middleware`, `logger`, and `metrics collector` were refactored internally for lower overhead.
+  - Kept resilient behavior and event-processing semantics intact.
+
+- **Consumer logging behavior**: `Consuming from:` is now emitted only once per consumer instance (avoids repeated noise on reconnect cycles).
+
+- **Unknown event fast-discard**: When `ignoreUnknownEvents` is enabled, unknown events are discarded immediately through the non-requeue path.
+
+### Fixed
+
+- **Security**: Updated transitive `lodash` to a safe version via `overrides` (`^4.18.1`) to resolve audit vulnerabilities.
+
+- **Test stability/noise**: Improved global test setup listener handling to avoid repeated process-level registrations and suppress `MaxListenersExceededWarning` noise during test runs.
+
+- **Integration cleanup robustness**: Hardened integration test cleanup paths with defensive teardown calls to avoid secondary errors when setup fails.
+
+- **Integration runner resilience**: Added runtime pre-check wrapper for integration tests to skip cleanly when Docker/Testcontainers runtime is unavailable.
+
 # [2.2.0] - 2026-03-31
 
 ### Added

@@ -41,9 +41,9 @@ describe('Integration: Automatic Reconnection', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
+        store?.clear();
         if (publisherStore) {
-            publisherStore.clear();
+            publisherStore?.clear();
         }
     });
 

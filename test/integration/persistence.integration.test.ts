@@ -32,7 +32,7 @@ describe('Integration: Persistence with EventStore', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
+        store?.clear();
     });
 
     it('should store events with PENDING status when storeOnly is true', async () => {

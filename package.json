@@ -1,6 +1,6 @@
 {
   "name": "@resilientmq/core",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "description": "Core logic for resilient RabbitMQ event processing",
@@ -9,7 +9,7 @@
     "build": "tsc",
     "test": "jest --config test/jest.config.js --forceExit",
     "test:unit": "jest --config test/jest.config.unit.js --forceExit",
-    "test:integration": "jest --config test/jest.config.integration.js --forceExit",
+    "test:integration": "node test/scripts/run-integration-tests.js",
     "test:stress": "jest --config test/jest.config.stress.js --forceExit",
     "test:benchmark": "jest --config test/jest.config.benchmark.js --forceExit",
     "test:all": "npm run test:unit && npm run test:integration && npm run test:stress",
@@ -55,6 +55,7 @@
     "amqplib": "^0.10.9"
   },
   "overrides": {
-    "undici": "^7.24.3"
+    "undici": "^7.24.3",
+    "lodash": "^4.18.1"
   }
 }

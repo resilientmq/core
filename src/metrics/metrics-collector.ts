@@ -22,6 +22,21 @@ export interface ResilientMQMetrics {
     lastActivityAt?: Date;
 }
 
+type CounterKey = keyof Omit<ResilientMQMetrics, 'avgProcessingTimeMs' | 'lastActivityAt'>;
+type CounterState = Omit<ResilientMQMetrics, 'avgProcessingTimeMs' | 'lastActivityAt'>;
+
+function createZeroCounters(): CounterState {
+    return {
+        messagesReceived: 0,
+        messagesProcessed: 0,
+        messagesRetried: 0,
+        messagesFailed: 0,
+        messagesSentToDLQ: 0,
+        messagesPublished: 0,
+        processingErrors: 0,
+    };
+}
+
 
 /**
  * Collects and exposes runtime metrics for consumers and publishers.
@@ -35,15 +50,7 @@ export interface ResilientMQMetrics {
  * ```
  */
 export class MetricsCollector {
-    private counters: Omit<ResilientMQMetrics, 'avgProcessingTimeMs' | 'lastActivityAt'> = {
-        messagesReceived: 0,
-        messagesProcessed: 0,
-        messagesRetried: 0,
-        messagesFailed: 0,
-        messagesSentToDLQ: 0,
-        messagesPublished: 0,
-        processingErrors: 0,
-    };
+    private counters: CounterState = createZeroCounters();
 
     private totalProcessingTimeMs = 0;
     private processingTimeSamples = 0;
@@ -52,7 +59,7 @@ export class MetricsCollector {
     /**
      * Increments a counter metric by 1 and updates lastActivityAt.
      */
-    increment(key: keyof Omit<ResilientMQMetrics, 'avgProcessingTimeMs' | 'lastActivityAt'>): void {
+    increment(key: CounterKey): void {
         this.counters[key]++;
         this.lastActivityAt = new Date();
     }
@@ -86,15 +93,7 @@ export class MetricsCollector {
      * Resets all counters and timing data to zero.
      */
     reset(): void {
-        this.counters = {
-            messagesReceived: 0,
-            messagesProcessed: 0,
-            messagesRetried: 0,
-            messagesFailed: 0,
-            messagesSentToDLQ: 0,
-            messagesPublished: 0,
-            processingErrors: 0,
-        };
+        this.counters = createZeroCounters();
         this.totalProcessingTimeMs = 0;
         this.processingTimeSamples = 0;
         this.lastActivityAt = undefined;

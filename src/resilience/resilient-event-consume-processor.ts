@@ -3,6 +3,18 @@ import { IgnoredEventError } from './ignored-event-error';
 import { log } from '../logger/logger';
 import { EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig } from '../types';
 
+/**
+ * Internal error used to short-circuit processing for unknown events when
+ * `ignoreUnknownEvents` is enabled. The queue layer will nack the message
+ * without requeueing so it is discarded immediately.
+ */
+class UnknownEventDiscardError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'UnknownEventDiscardError';
+    }
+}
+
 
 /**
  * Handles the lifecycle of consuming events: deduplication, retries, and DLQ routing.
@@ -18,8 +30,10 @@ export class ResilientEventConsumeProcessor {
      * and manages retries or DLQ routing on failure.
      */
     async process(event: EventMessage): Promise<void> {
+        const { config } = this;
+        const { store, eventsToProcess, events, middleware, retryQueue, ignoreUnknownEvents } = config;
         const retryCount = this.getRetryCount(event);
-        const maxAttempts = this.config.retryQueue?.maxAttempts ?? 3;
+        const maxAttempts = retryQueue?.maxAttempts ?? 3;
 
         // Hard guard: already at or past the limit — route to DLQ immediately
         if (retryCount >= maxAttempts) {
@@ -36,43 +50,48 @@ export class ResilientEventConsumeProcessor {
         try {
             // onEventStart hook with skip control
             const control = { skipEvent: false };
-            this.config.events?.onEventStart?.(event, control);
+            events?.onEventStart?.(event, control);
             if (control.skipEvent) return;
 
             // Deduplication
             let existing = null;
-            if (this.config.store) {
-                existing = await this.config.store.getEvent(event);
+            if (store) {
+                existing = await store.getEvent(event);
             }
 
-            const match = this.config.eventsToProcess.find(e => e.type === event.type);
+            const match = eventsToProcess.find(e => e.type === event.type);
             if (match) log('info', `[Processor] Processing ${event.messageId} (type: ${event.type}, attempt: ${retryCount + 1})`);
 
             if (existing && retryCount === 0) {
                 log('warn', `[Processor] Duplicate event: ${event.messageId}, skipping`);
                 return;
             } else if (existing) {
-                if (this.config.store) await this.config.store.updateEventStatus(event, event.status as EventConsumeStatus);
-            } else if (match || !this.config.ignoreUnknownEvents) {
-                if (this.config.store) await this.config.store.saveEvent(event);
+                if (store) await store.updateEventStatus(event, event.status as EventConsumeStatus);
+            } else if (match || !ignoreUnknownEvents) {
+                if (store) await store.saveEvent(event);
             }
 
             if (!match) {
-                if (!this.config.ignoreUnknownEvents && this.config.store) {
-                    await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
+                if (ignoreUnknownEvents) {
+                    log('debug', `[Processor] Unknown event ${event.messageId} skipped immediately`);
+                    throw new UnknownEventDiscardError(`Unknown event type: ${event.type}`);
+                }
+
+                if (store) {
+                    await store.updateEventStatus(event, EventConsumeStatus.DONE);
                 }
                 return;
             }
 
             const runner = async () => {
-                if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
+                if (store) await store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
                 await match.handler(event);
-                if (this.config.store) await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
-                this.config.events?.onSuccess?.(event);
+                if (store) await store.updateEventStatus(event, EventConsumeStatus.DONE);
+                events?.onSuccess?.(event);
             };
 
-            if (this.config.middleware?.length) {
-                await applyMiddleware(this.config.middleware, event, runner);
+            if (middleware?.length) {
+                await applyMiddleware(middleware, event, runner);
             } else {
                 await runner();
             }
@@ -80,12 +99,16 @@ export class ResilientEventConsumeProcessor {
             log('info', `[Processor] Successfully processed ${event.messageId}`);
 
         } catch (err) {
+            if (err instanceof UnknownEventDiscardError) {
+                throw err;
+            }
+
             if (err instanceof IgnoredEventError) {
                 log('warn', `[Processor] Evento ${event.messageId} ignorado: ${err.message}`);
-                if (this.config.store) {
-                    await this.config.store.updateEventStatus(event, EventConsumeStatus.DONE);
+                if (store) {
+                    await store.updateEventStatus(event, EventConsumeStatus.DONE);
                 }
-                this.config.events?.onSuccess?.(event);
+                events?.onSuccess?.(event);
                 return;
             }
             log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
@@ -99,12 +122,12 @@ export class ResilientEventConsumeProcessor {
                     return;
                 }
 
-                if (this.config.store) {
-                    await this.config.store.updateEventStatus(event, EventConsumeStatus.RETRY);
+                if (store) {
+                    await store.updateEventStatus(event, EventConsumeStatus.RETRY);
                 }
-                this.config.events?.onError?.(event, err as Error);
+                events?.onError?.(event, err as Error);
 
-                if (this.config.retryQueue) {
+                if (retryQueue) {
                     await this.publishToRetryQueue(event, retryCount);
                 } else {
                     await this.sendToDlqOrDiscard(event, currentAttempt, err as Error);

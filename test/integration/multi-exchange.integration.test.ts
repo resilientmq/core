@@ -41,9 +41,9 @@ describe('Integration: Multiple Exchanges and Routing Keys', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
+        store?.clear();
         if (publisherStore) {
-            publisherStore.clear();
+            publisherStore?.clear();
         }
     });
 

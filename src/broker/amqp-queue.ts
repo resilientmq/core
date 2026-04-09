@@ -57,11 +57,13 @@ export class AmqpQueue implements MessageQueue {
      * Publishes an event to a queue or exchange.
      */
     async publish(destination: string, event: EventMessage, options?: PublishOptions): Promise<void> {
+        const channel = this._channel;
         const content = Buffer.from(JSON.stringify(event.payload));
         /* istanbul ignore next */
-        const existingHeaders = event.properties?.headers ?? {};
+        const eventProperties = event.properties;
+        const existingHeaders = eventProperties?.headers ?? {};
         const props = {
-            ...(event.properties ?? {}),
+            ...(eventProperties ?? {}),
             messageId: event.messageId,
             type: event.type,
             persistent: true,
@@ -74,10 +76,10 @@ export class AmqpQueue implements MessageQueue {
 
         if (options?.exchange) {
             const { name, type, options: exchangeOptions } = options.exchange;
-            await this._channel.assertExchange(name, type, exchangeOptions);
-            this._channel.publish(name, event.routingKey ?? '', content, props);
+            await channel.assertExchange(name, type, exchangeOptions);
+            channel.publish(name, event.routingKey ?? '', content, props);
         } else {
-            this._channel.sendToQueue(destination, content, props);
+            channel.sendToQueue(destination, content, props);
         }
     }
 
@@ -86,7 +88,8 @@ export class AmqpQueue implements MessageQueue {
      * Acks on success, nacks (no requeue) on failure to trigger DLX routing.
      */
     async consume(queue: string, onMessage: (event: EventMessage) => Promise<void>): Promise<void> {
-        const { consumerTag } = await this._channel.consume(queue, async (msg) => {
+        const channel = this._channel;
+        const { consumerTag } = await channel.consume(queue, async (msg) => {
             /* istanbul ignore next */
             if (!msg) return;
 
@@ -100,17 +103,19 @@ export class AmqpQueue implements MessageQueue {
 
                 await onMessage({ messageId, type, payload, status: EventConsumeStatus.RECEIVED, properties: msg.properties });
 
-                if (this.isChannelWritable()) {
+                const channelWritable = this.isChannelWritable();
+                if (channelWritable) {
                     this._pendingAcks++;
-                    try { this._channel.ack(msg); } finally { this._pendingAcks--; }
+                    try { channel.ack(msg); } finally { this._pendingAcks--; }
                 } else {
                     log('warn', '[AMQP] Cannot ack: channel not writable');
                 }
             } catch {
-                if (this.isChannelWritable()) {
+                const channelWritable = this.isChannelWritable();
+                if (channelWritable) {
                     this._pendingAcks++;
                     try {
-                        this._channel.nack(msg, false, false);
+                        channel.nack(msg, false, false);
                     } catch (nackErr) {
                         log('error', '[AMQP] Failed to nack message', nackErr);
                     } finally {
@@ -154,14 +159,16 @@ export class AmqpQueue implements MessageQueue {
      */
     async disconnect(): Promise<void> {
         if (this.closed) return;
+        const channel = this._channel;
+        const connection = this._connection;
 
         await this.cancelAllConsumers();
         await this.waitForProcessing();
 
-        try { if (this._channel) await this._channel.close(); } catch (err) {
+        try { if (channel) await channel.close(); } catch (err) {
             log('warn', '[AMQP] Error closing channel', err);
         }
-        try { if (this._connection) await this._connection.close(); } catch (err) {
+        try { if (connection) await connection.close(); } catch (err) {
             log('warn', '[AMQP] Error closing connection', err);
         }
 
@@ -179,8 +186,10 @@ export class AmqpQueue implements MessageQueue {
      */
     async forceClose(): Promise<void> {
         this.closed = true;
-        try { if (this._channel) await this._channel.close(); } catch {}
-        try { if (this._connection) await this._connection.close(); } catch {}
+        const channel = this._channel;
+        const connection = this._connection;
+        try { if (channel) await channel.close(); } catch {}
+        try { if (connection) await connection.close(); } catch {}
     }
 
     /* istanbul ignore next */

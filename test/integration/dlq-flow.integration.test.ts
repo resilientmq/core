@@ -23,7 +23,7 @@ describe('Integration: Dead Letter Queue Flow', () => {
     }, 60000);
 
     afterAll(async () => {
-        await rabbitMQHelpers.disconnect();
+        await rabbitMQHelpers?.disconnect?.();
         await containerManager.stopAll();
     }, 30000);
 
@@ -46,9 +46,9 @@ describe('Integration: Dead Letter Queue Flow', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
+        store?.clear();
         if (publisherStore) {
-            publisherStore.clear();
+            publisherStore?.clear();
         }
     });
 

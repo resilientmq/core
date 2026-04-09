@@ -42,9 +42,9 @@ describe('Integration: Retry Logic', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
+        store?.clear();
         if (publisherStore) {
-            publisherStore.clear();
+            publisherStore?.clear();
         }
     });
 

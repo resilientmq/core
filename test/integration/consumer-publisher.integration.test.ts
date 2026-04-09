@@ -22,7 +22,7 @@ describe('Integration: Consumer-Publisher Flow', () => {
     }, 60000);
 
     afterAll(async () => {
-        await rabbitMQHelpers.disconnect();
+        await rabbitMQHelpers?.disconnect?.();
         await containerManager.stopAll();
     }, 30000);
 
@@ -48,9 +48,9 @@ describe('Integration: Consumer-Publisher Flow', () => {
                 // Ignore cleanup errors
             }
         }
-        store.clear();
+        store?.clear();
         if (publisherStore) {
-            publisherStore.clear();
+            publisherStore?.clear();
         }
     });
 

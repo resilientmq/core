@@ -11,6 +11,10 @@ jest.mock('amqplib', () => {
     };
 });
 
+jest.mock('../../../src/logger/logger', () => ({
+    log: jest.fn()
+}));
+
 // Mock the AmqpQueue to avoid real connections
 jest.mock('../../../src/broker/amqp-queue');
 
@@ -136,6 +140,37 @@ describe('ResilientConsumer', () => {
 
             // Should not throw
             await expect(consumer.start()).resolves.not.toThrow();
+        });
+
+        it('should log consuming from queue only once per consumer instance', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            const logMock = require('../../../src/logger/logger').log as jest.Mock;
+
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({ exchange: 'test.exchange' }),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: {
+                    on: jest.fn()
+                }
+            }));
+
+            consumer = new ResilientConsumer(config);
+
+            await consumer.start();
+            await (consumer as any).setupAndConsume();
+
+            const consumeLogs = logMock.mock.calls.filter(([level, message]) =>
+                level === 'info' && message === '[Consumer] Consuming from: test.queue'
+            );
+
+            expect(consumeLogs).toHaveLength(1);
         });
 
         it('should exit checkStoreConnection early if no store is configured', async () => {

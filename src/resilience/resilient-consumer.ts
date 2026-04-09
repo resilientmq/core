@@ -13,6 +13,7 @@ export class ResilientConsumer {
     private idleMonitorTimer?: ReturnType<typeof setInterval>;
     private reconnecting = false;
     private storeConnected = false;
+    private hasLoggedConsumeStart = false;
     private _processingCount = 0;
     private sigTermHandler?: () => void;
     private sigIntHandler?: () => void;
@@ -83,12 +84,15 @@ export class ResilientConsumer {
     // ─── Setup ─────────────────────────────────────────────────────────────────
 
     private async setupAndConsume(): Promise<void> {
+        const { consumeQueue, prefetch, store } = this.config;
+        const queueName = consumeQueue.queue;
+
         this.queue = new AmqpQueue(this.config.connection);
-        await this.queue.connect(/* istanbul ignore next */ this.config.prefetch ?? 1);
+        await this.queue.connect(/* istanbul ignore next */ prefetch ?? 1);
 
         await this.setupQueuesAndExchanges();
 
-        if (this.config.store && !this.storeConnected) {
+        if (store && !this.storeConnected) {
             await this.checkStoreConnection();
         }
 
@@ -97,18 +101,19 @@ export class ResilientConsumer {
             broker: this.queue,
         } as RabbitMQResilientProcessorConfig);
 
-        const { queue: consumeQueue } = this.config.consumeQueue;
-        await this.queue.consume(consumeQueue, async (event: EventMessage) => {
+        await this.queue.consume(queueName, async (event: EventMessage) => {
             this._processingCount++;
             this.metrics?.increment('messagesReceived');
-            const startTime = Date.now();
+            const startedAt = this.metrics ? Date.now() : 0;
             try {
-                if (this.config.store && !this.storeConnected) {
+                if (store && !this.storeConnected) {
                     await this.checkStoreConnection();
                 }
                 await this.processor.process(event);
                 this.metrics?.increment('messagesProcessed');
-                this.metrics?.recordProcessingTime(Date.now() - startTime);
+                if (this.metrics) {
+                    this.metrics.recordProcessingTime(Date.now() - startedAt);
+                }
             } catch (error) {
                 /* istanbul ignore next */
                 this.metrics?.increment('processingErrors');
@@ -119,34 +124,40 @@ export class ResilientConsumer {
             }
         });
 
-        log('info', `[Consumer] Consuming from: ${consumeQueue}`);
+        if (!this.hasLoggedConsumeStart) {
+            log('info', `[Consumer] Consuming from: ${queueName}`);
+            this.hasLoggedConsumeStart = true;
+        }
         this.scheduleReconnection();
         this.startHeartbeat();
         await this.startIdleMonitor();
     }
 
     private async setupQueuesAndExchanges(): Promise<void> {
+        const channel = this.queue.channel;
         const { queue: consumeQueue, options, exchanges } = this.config.consumeQueue;
+        const deadLetterQueue = this.config.deadLetterQueue;
+        const retryQueue = this.config.retryQueue;
 
         // Dead letter queue
         let dlqExchangeName = '';
-        if (this.config.deadLetterQueue) {
-            const { queue: dlqName, exchange: dlqExchange, options: dlqOptions } = this.config.deadLetterQueue;
+        if (deadLetterQueue) {
+            const { queue: dlqName, exchange: dlqExchange, options: dlqOptions } = deadLetterQueue;
             if (dlqExchange) {
                 dlqExchangeName = dlqExchange.name;
-                await this.queue.channel.assertExchange(dlqExchange.name, dlqExchange.type, dlqExchange.options);
+                await channel.assertExchange(dlqExchange.name, dlqExchange.type, dlqExchange.options);
             }
-            await this.queue.channel.assertQueue(dlqName, dlqOptions);
+            await channel.assertQueue(dlqName, dlqOptions);
             if (dlqExchange) {
-                await this.queue.channel.bindQueue(dlqName, dlqExchange.name, /* istanbul ignore next */ dlqExchange.routingKey ?? '');
+                await channel.bindQueue(dlqName, dlqExchange.name, /* istanbul ignore next */ dlqExchange.routingKey ?? '');
             }
         }
 
         // Retry queue
         let retryExchangeName = '';
-        if (this.config.retryQueue) {
-            const { queue: retryQueueName, exchange: retryExchange, options: retryOptions } = this.config.retryQueue;
-            const ttl = /* istanbul ignore next */ this.config.retryQueue.ttlMs ?? 5000;
+        if (retryQueue) {
+            const { queue: retryQueueName, exchange: retryExchange, options: retryOptions } = retryQueue;
+            const ttl = /* istanbul ignore next */ retryQueue.ttlMs ?? 5000;
 
             let retryDlxExchange = '';
             let retryDlxRoutingKey = '';
@@ -160,10 +171,10 @@ export class ResilientConsumer {
 
             if (retryExchange) {
                 retryExchangeName = retryExchange.name;
-                await this.queue.channel.assertExchange(retryExchange.name, retryExchange.type, retryExchange.options);
+                await channel.assertExchange(retryExchange.name, retryExchange.type, retryExchange.options);
             }
 
-            await this.queue.channel.assertQueue(retryQueueName, {
+            await channel.assertQueue(retryQueueName, {
                 ...retryOptions,
                 arguments: {
                     /* istanbul ignore next */
@@ -175,33 +186,33 @@ export class ResilientConsumer {
             });
 
             if (retryExchange) {
-                await this.queue.channel.bindQueue(retryQueueName, retryExchange.name, /* istanbul ignore next */ retryExchange.routingKey ?? '');
+                await channel.bindQueue(retryQueueName, retryExchange.name, /* istanbul ignore next */ retryExchange.routingKey ?? '');
             }
         }
 
         // Main queue
         /* istanbul ignore next */
         const mainQueueArgs: any = { ...options?.arguments };
-        if (this.config.retryQueue) {
+        if (retryQueue) {
             mainQueueArgs['x-dead-letter-exchange'] = retryExchangeName || '';
             mainQueueArgs['x-dead-letter-routing-key'] = retryExchangeName
-                ? /* istanbul ignore next */ (this.config.retryQueue.exchange?.routingKey ?? '')
-                : this.config.retryQueue.queue;
-        } else if (this.config.deadLetterQueue && dlqExchangeName) {
+                ? /* istanbul ignore next */ (retryQueue.exchange?.routingKey ?? '')
+                : retryQueue.queue;
+        } else if (deadLetterQueue && dlqExchangeName) {
             mainQueueArgs['x-dead-letter-exchange'] = dlqExchangeName;
-            mainQueueArgs['x-dead-letter-routing-key'] = /* istanbul ignore next */ this.config.deadLetterQueue.exchange?.routingKey ?? '';
+            mainQueueArgs['x-dead-letter-routing-key'] = /* istanbul ignore next */ deadLetterQueue.exchange?.routingKey ?? '';
         }
 
         if (exchanges?.length) {
             for (const ex of exchanges) {
-                await this.queue.channel.assertExchange(ex.name, ex.type, ex.options);
+                await channel.assertExchange(ex.name, ex.type, ex.options);
             }
-            await this.queue.channel.assertQueue(consumeQueue, { ...options, arguments: mainQueueArgs });
+            await channel.assertQueue(consumeQueue, { ...options, arguments: mainQueueArgs });
             for (const ex of exchanges) {
-                await this.queue.channel.bindQueue(consumeQueue, ex.name, /* istanbul ignore next */ ex.routingKey ?? '');
+                await channel.bindQueue(consumeQueue, ex.name, /* istanbul ignore next */ ex.routingKey ?? '');
             }
         } else {
-            await this.queue.channel.assertQueue(consumeQueue, { ...options, arguments: mainQueueArgs });
+            await channel.assertQueue(consumeQueue, { ...options, arguments: mainQueueArgs });
         }
     }
 
@@ -216,9 +227,10 @@ export class ResilientConsumer {
 
     private startHeartbeat(): void {
         const interval = /* istanbul ignore next */ this.config.heartbeatIntervalMs ?? 30000;
+        const queueName = this.config.consumeQueue.queue;
         this.heartbeatTimer = setInterval(async () => {
             try {
-                await this.queue.channel.checkQueue(this.config.consumeQueue.queue);
+                await this.queue.channel.checkQueue(queueName);
             } catch (error) {
                 log('error', '[Consumer] Heartbeat failed', error);
                 await this.reconnect();
@@ -233,17 +245,19 @@ export class ResilientConsumer {
         const checkInterval = this.config.idleCheckIntervalMs ?? 10000;
         /* istanbul ignore next */
         const maxIdle = this.config.maxIdleChecks ?? 3;
+        const queueName = this.config.consumeQueue.queue;
+        const retryQueueName = this.config.retryQueue?.queue;
         let idleCount = 0;
 
         this.idleMonitorTimer = setInterval(async () => {
             if (this.reconnecting) return;
             try {
                 let totalMessages = 0;
-                const main = await this.queue.channel.checkQueue(this.config.consumeQueue.queue);
+                const main = await this.queue.channel.checkQueue(queueName);
                 totalMessages += main.messageCount;
 
-                if (this.config.retryQueue?.queue) {
-                    const retry = await this.queue.channel.checkQueue(this.config.retryQueue.queue);
+                if (retryQueueName) {
+                    const retry = await this.queue.channel.checkQueue(retryQueueName);
                     totalMessages += retry.messageCount;
                 }
 
@@ -271,17 +285,18 @@ export class ResilientConsumer {
     private async reconnect(): Promise<void> {
         if (this.reconnecting) return;
         this.reconnecting = true;
+        const queue = this.queue;
 
         await this.waitForProcessing();
         this.stopTimers();
 
         try {
-            await this.queue.cancelAllConsumers();
-            await this.queue.channel.close();
+            await queue.cancelAllConsumers();
+            await queue.channel.close();
             /* istanbul ignore next */
-            const socket = (this.queue.connection as any)?.connection?.stream;
+            const socket = (queue.connection as any)?.connection?.stream;
             /* istanbul ignore next */
-            if (socket?.writable) await this.queue.connection.close();
+            if (socket?.writable) await queue.connection.close();
         } catch (err) {
             log('error', '[Consumer] Error during reconnect cleanup', err);
         }

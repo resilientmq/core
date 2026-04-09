@@ -1,5 +1,13 @@
 import {LogLevel} from "../types";
 
+const LEVEL_PRIORITY: Record<LogLevel, number> = {
+    none: 0,
+    error: 1,
+    warn: 2,
+    info: 3,
+    debug: 4
+};
+
 /**
  * Internal state for current log level.
  */
@@ -53,15 +61,7 @@ function formatMessage(message: string): string {
  * @param optionalParams - Optional additional data to log.
  */
 export function log(level: LogLevel, message: string, ...optionalParams: unknown[]): void {
-    const levels: Record<LogLevel, number> = {
-        none: 0,
-        error: 1,
-        warn: 2,
-        info: 3,
-        debug: 4
-    };
-
-    if (levels[level] <= levels[currentLevel]) {
+    if (LEVEL_PRIORITY[level] <= LEVEL_PRIORITY[currentLevel]) {
         const formattedMessage = formatMessage(message);
 
         if (level === 'error') {
