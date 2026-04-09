@@ -408,7 +408,7 @@ jobs:
   summary:
     name: CI/CD Summary
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, stress-tests, benchmarks]
+    needs: [unit-tests, integration-tests, stress-tests, benchmarks, build, publish]
     if: always()
 
     steps:
@@ -467,6 +467,8 @@ jobs:
             ['Integration Tests', '${{ needs.integration-tests.result }}'],
             ['Stress Tests',      '${{ needs.stress-tests.result }}'],
             ['Benchmarks',        '${{ needs.benchmarks.result }}'],
+            ['Build',             '${{ needs.build.result }}'],
+            ['Publish',           '${{ needs.publish.result }}'],
           ];
           for (const [name, result] of jobs) {
             push(`| ${name} | ${jobIcon(result)} ${result} |`);
