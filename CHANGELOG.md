@@ -1,3 +1,20 @@
+# [2.2.4] - 2026-04-09
+
+### Added
+
+- **Consumer config**: Added `cleanupConsumerPrefetch` for the secondary cleanup connection used with `ignoreUnknownEvents`.
+  - Default: `500`
+  - Set to `0` to disable cleanup functionality
+
+### Changed
+
+- **Unknown events path**: Consumer now suppresses processor-level unknown-event discard errors so they are not rethrown to the queue layer.
+- **Max retry exceeded path**: Consumer now suppresses `max retry attempts exceeded` errors from the processor callback to avoid unintended retry requeueing.
+
+### Fixed
+
+- **Retry pollution**: Prevented unknown/ignored events and max-retry-exceeded guard cases from being treated as processing failures by the queue callback.
+
 # [2.2.3] - 2026-04-09
 
 ### Changed

@@ -8,12 +8,15 @@ import { MetricsCollector, ResilientMQMetrics } from '../metrics/metrics-collect
 export class ResilientConsumer {
     private processor!: ResilientEventConsumeProcessor;
     private queue!: AmqpQueue;
+    private cleanupQueue?: AmqpQueue;
     private uptimeTimer?: ReturnType<typeof setTimeout>;
     private heartbeatTimer?: ReturnType<typeof setInterval>;
     private idleMonitorTimer?: ReturnType<typeof setInterval>;
+    private cleanupTimer?: ReturnType<typeof setInterval>;
     private reconnecting = false;
     private storeConnected = false;
     private hasLoggedConsumeStart = false;
+    private cleanupTickInProgress = false;
     private _processingCount = 0;
     private sigTermHandler?: () => void;
     private sigIntHandler?: () => void;
@@ -74,8 +77,15 @@ export class ResilientConsumer {
                 await this.queue.cancelAllConsumers();
                 await this.queue.disconnect();
             }
+
+            if (this.cleanupQueue && !this.cleanupQueue.closed) {
+                await this.cleanupQueue.cancelAllConsumers();
+                await this.cleanupQueue.disconnect();
+            }
         } catch (error) {
             log('error', '[Consumer] Error during stop', error);
+        } finally {
+            this.cleanupQueue = undefined;
         }
 
         log('info', '[Consumer] Stopped');
@@ -101,6 +111,8 @@ export class ResilientConsumer {
             broker: this.queue,
         } as RabbitMQResilientProcessorConfig);
 
+        await this.startUnknownEventsCleanup(queueName);
+
         await this.queue.consume(queueName, async (event: EventMessage) => {
             this._processingCount++;
             this.metrics?.increment('messagesReceived');
@@ -115,6 +127,9 @@ export class ResilientConsumer {
                     this.metrics.recordProcessingTime(Date.now() - startedAt);
                 }
             } catch (error) {
+                if (this.shouldSuppressProcessorError(error, event.messageId)) {
+                    return;
+                }
                 /* istanbul ignore next */
                 this.metrics?.increment('processingErrors');
                 log('error', `[Consumer] Error processing message ${event.messageId}`, error);
@@ -278,6 +293,7 @@ export class ResilientConsumer {
         if (this.uptimeTimer) { clearTimeout(this.uptimeTimer); this.uptimeTimer = undefined; }
         if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = undefined; }
         if (this.idleMonitorTimer) { clearInterval(this.idleMonitorTimer); this.idleMonitorTimer = undefined; }
+        if (this.cleanupTimer) { clearInterval(this.cleanupTimer); this.cleanupTimer = undefined; }
     }
 
     // ─── Reconnection ──────────────────────────────────────────────────────────
@@ -286,6 +302,7 @@ export class ResilientConsumer {
         if (this.reconnecting) return;
         this.reconnecting = true;
         const queue = this.queue;
+        const cleanupQueue = this.cleanupQueue;
 
         await this.waitForProcessing();
         this.stopTimers();
@@ -297,6 +314,21 @@ export class ResilientConsumer {
             const socket = (queue.connection as any)?.connection?.stream;
             /* istanbul ignore next */
             if (socket?.writable) await queue.connection.close();
+
+            if (cleanupQueue && !cleanupQueue.closed) {
+                try {
+                    await cleanupQueue.cancelAllConsumers();
+                    await cleanupQueue.channel.close();
+                    /* istanbul ignore next */
+                    const cleanupSocket = (cleanupQueue.connection as any)?.connection?.stream;
+                    /* istanbul ignore next */
+                    if (cleanupSocket?.writable) await cleanupQueue.connection.close();
+                } catch (cleanupErr) {
+                    log('error', '[Consumer] Error during cleanup-queue reconnect cleanup', cleanupErr);
+                } finally {
+                    this.cleanupQueue = undefined;
+                }
+            }
         } catch (err) {
             log('error', '[Consumer] Error during reconnect cleanup', err);
         }
@@ -354,6 +386,82 @@ export class ResilientConsumer {
                 await new Promise(resolve => setTimeout(resolve, retryDelay));
             }
         }
+    }
+
+    // ─── Unknown Event Cleanup (secondary connection) ───────────────────────
+
+    private async startUnknownEventsCleanup(queueName: string): Promise<void> {
+        if (!this.config.ignoreUnknownEvents) {
+            return;
+        }
+
+        const cleanupPrefetch = this.config.cleanupConsumerPrefetch ?? 500;
+        if (cleanupPrefetch === 0) {
+            log('debug', '[Consumer] Cleanup consumer disabled by config (cleanupConsumerPrefetch=0)');
+            return;
+        }
+
+        this.cleanupQueue = new AmqpQueue(this.config.connection);
+        await this.cleanupQueue.connect(cleanupPrefetch);
+
+        const cleanupChannel: any = this.cleanupQueue.channel;
+        if (typeof cleanupChannel?.get !== 'function') {
+            log('debug', '[Consumer] Cleanup consumer disabled: channel.get is not available');
+            return;
+        }
+
+        const knownTypes = new Set(this.config.eventsToProcess.map((e) => e.type));
+        const pollIntervalMs = 25;
+
+        this.cleanupTimer = setInterval(async () => {
+            if (this.reconnecting || this.cleanupTickInProgress) {
+                return;
+            }
+
+            this.cleanupTickInProgress = true;
+            try {
+                const msg = await cleanupChannel.get(queueName, { noAck: false });
+                if (!msg) {
+                    return;
+                }
+
+                const type = msg.properties?.type || msg.properties?.headers?.['x-event-type'];
+                const shouldDiscard = !!type && !knownTypes.has(type);
+
+                if (shouldDiscard) {
+                    cleanupChannel.ack(msg);
+                    log('debug', `[Consumer] Cleanup discarded ignored event type: ${String(type)}`);
+                } else {
+                    // Keep processable messages in queue for the main consumer.
+                    cleanupChannel.nack(msg, false, true);
+                }
+            } catch (error) {
+                log('error', '[Consumer] Cleanup consumer tick failed', error);
+            } finally {
+                this.cleanupTickInProgress = false;
+            }
+        }, pollIntervalMs);
+    }
+
+    private shouldSuppressProcessorError(error: unknown, messageId: string): boolean {
+        if (!(error instanceof Error)) {
+            return false;
+        }
+
+        // Unknown events are intentionally ignored when ignoreUnknownEvents is enabled.
+        if (error.name === 'UnknownEventDiscardError') {
+            log('debug', `[Consumer] Ignored unknown event ${messageId} without retry`);
+            return true;
+        }
+
+        // Max-retry guard should never be treated as a processing failure.
+        const msg = error.message?.toLowerCase?.() ?? '';
+        if (msg.includes('max retry attempts') && msg.includes('exceeded')) {
+            log('debug', `[Consumer] Max retries exceeded for ${messageId} handled without retry requeue`);
+            return true;
+        }
+
+        return false;
     }
 
     // ─── Validation ────────────────────────────────────────────────────────────

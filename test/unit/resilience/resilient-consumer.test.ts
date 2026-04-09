@@ -989,6 +989,90 @@ describe('ResilientConsumer', () => {
             expect(checkStoreSpy).toHaveBeenCalled();
         });
 
+        it('should not rethrow UnknownEventDiscardError from processor (avoids retry/DLX routing)', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            let consumeCallback: any;
+
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockImplementation(async (_queue: string, callback: any) => {
+                    consumeCallback = callback;
+                }),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            jest.spyOn((consumer as any).processor, 'process').mockRejectedValue(
+                Object.assign(new Error('Unknown event type: unknown.type'), { name: 'UnknownEventDiscardError' })
+            );
+
+            const testEvent = {
+                messageId: 'msg-unknown-discard',
+                type: 'unknown.type',
+                payload: {},
+                properties: {}
+            };
+
+            if (consumeCallback) {
+                await expect(consumeCallback(testEvent)).resolves.toBeUndefined();
+            }
+        });
+
+        it('should not rethrow max retry exceeded errors from processor', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            let consumeCallback: any;
+
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockResolvedValue(undefined),
+                consume: jest.fn().mockImplementation(async (_queue: string, callback: any) => {
+                    consumeCallback = callback;
+                }),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            jest.spyOn((consumer as any).processor, 'process').mockRejectedValue(
+                new Error('Max retry attempts (3) exceeded')
+            );
+
+            const testEvent = {
+                messageId: 'msg-max-retry-exceeded',
+                type: 'test.event',
+                payload: {},
+                properties: {}
+            };
+
+            if (consumeCallback) {
+                await expect(consumeCallback(testEvent)).resolves.toBeUndefined();
+            }
+        });
+
         it('should log error when idle check throws', async () => {
             jest.useRealTimers();
 
@@ -1055,6 +1139,73 @@ describe('ResilientConsumer', () => {
 
             // checkStoreConnection should have been called from setupAndConsume (line 72)
             expect(checkStoreSpy).toHaveBeenCalled();
+        });
+
+        it('should use default cleanup consumer prefetch of 500', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            const connectCalls: number[] = [];
+
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockImplementation(async (prefetch: number) => {
+                    connectCalls.push(prefetch);
+                }),
+                consume: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    get: jest.fn().mockResolvedValue(null),
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            config.ignoreUnknownEvents = true;
+            delete (config as any).cleanupConsumerPrefetch;
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            expect(connectCalls).toContain(10);   // main consumer prefetch
+            expect(connectCalls).toContain(500);  // cleanup consumer default prefetch
+        });
+
+        it('should disable cleanup consumer when cleanupConsumerPrefetch is 0', async () => {
+            const AmqpQueue = require('../../../src/broker/amqp-queue').AmqpQueue;
+            const connectCalls: number[] = [];
+
+            AmqpQueue.mockImplementation(() => ({
+                connect: jest.fn().mockImplementation(async (prefetch: number) => {
+                    connectCalls.push(prefetch);
+                }),
+                consume: jest.fn().mockResolvedValue(undefined),
+                disconnect: jest.fn().mockResolvedValue(undefined),
+                cancelAllConsumers: jest.fn().mockResolvedValue(undefined),
+                publish: jest.fn().mockResolvedValue(undefined),
+                channel: {
+                    get: jest.fn().mockResolvedValue(null),
+                    assertQueue: jest.fn().mockResolvedValue({ queue: 'test.queue' }),
+                    assertExchange: jest.fn().mockResolvedValue({}),
+                    bindQueue: jest.fn().mockResolvedValue({}),
+                    consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' }),
+                    checkQueue: jest.fn().mockResolvedValue({ queue: 'test.queue', messageCount: 0 })
+                },
+                connection: { on: jest.fn() },
+                closed: false
+            }));
+
+            config.ignoreUnknownEvents = true;
+            (config as any).cleanupConsumerPrefetch = 0;
+
+            consumer = new ResilientConsumer(config);
+            await consumer.start();
+
+            expect(connectCalls).toEqual([10]); // only main consumer connects
         });
     });
 });

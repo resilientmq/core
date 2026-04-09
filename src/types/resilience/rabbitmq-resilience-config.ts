@@ -131,6 +131,15 @@ export type ResilientConsumerConfig = {
     prefetch?: number;
 
     /**
+     * Prefetch used by the secondary cleanup consumer connection (only when
+     * `ignoreUnknownEvents` is enabled).
+     *
+     * - Default: 500
+     * - Set to 0 to disable cleanup consumer functionality
+     */
+    cleanupConsumerPrefetch?: number;
+
+    /**
      * List of event types and handlers to be processed.
      */
     eventsToProcess: EventProcessConfig[];

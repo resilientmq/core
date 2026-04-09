@@ -105,6 +105,7 @@ This package contains the **runtime logic** for publishing and consuming resilie
 | `store`                    | `EventStore`                | ❌ | Persistent layer for events        | saveEvent, getEvent, updateEventStatus, deleteEvent, getPendingEvents (optional), batchUpdateEventStatus (optional) |
 | `storeConnectionRetries`   | `number`                    | ❌ | Max retry attempts for store connection (default: 3) | – |
 | `storeConnectionRetryDelayMs` | `number`                 | ❌ | Delay between store retry attempts in ms (default: 1000) | – |
+| `cleanupConsumerPrefetch`   | `number`                    | ❌ | Prefetch for secondary cleanup connection used when `ignoreUnknownEvents` is true (default: 500, set `0` to disable) | – |
 | `middleware`               | `Middleware[]`              | ❌ | Hooks to wrap event execution      | (event, next) => Promise |
 | `maxUptimeMs`              | `number`                    | ❌ | Restart consumer after X ms        | – |
 | `exitIfIdle`               | `boolean`                   | ❌ | Exit process if idle               | – |
