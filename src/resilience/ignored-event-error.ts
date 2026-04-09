@@ -4,3 +4,4 @@ export class IgnoredEventError extends Error {
         this.name = 'IgnoredEventError';
     }
 }
+
