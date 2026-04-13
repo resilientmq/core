@@ -1,3 +1,15 @@
+# [2.3.1] - 2026-04-13
+
+### Added
+
+- **AmqpQueue `routingKey`**: Consumed events now include `routingKey` from the broker message (`msg.fields.routingKey`) when present.
+
+### Testing
+
+- Added unit coverage for `routingKey` on `consume` (including `undefined` when absent).
+- Added integration test for topic exchange publishes verifying `routingKey` propagation (Testcontainers).
+- Extended `amqplib` test mock so simulated messages can supply custom `fields` (e.g. `routingKey`).
+
 # [2.3.0] - 2026-04-09
 
 ### Added
