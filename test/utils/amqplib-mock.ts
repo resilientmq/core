@@ -341,14 +341,15 @@ export class MockChannel {
     }
 
     private createMessage(content: Buffer, options?: any): ConsumeMessage {
+        const f = options?.fields;
         return {
             content,
             fields: {
-                deliveryTag: Math.random(),
-                redelivered: false,
-                exchange: '',
-                routingKey: '',
-                consumerTag: 'mock-consumer'
+                deliveryTag: f?.deliveryTag ?? Math.random(),
+                redelivered: f?.redelivered ?? false,
+                exchange: f?.exchange ?? '',
+                routingKey: f?.routingKey ?? '',
+                consumerTag: f?.consumerTag ?? 'mock-consumer'
             },
             properties: {
                 contentType: options?.contentType,

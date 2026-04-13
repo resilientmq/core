@@ -309,6 +309,45 @@ describe('AmqpQueue', () => {
             expect(queue1Messages[0].payload).toEqual({ data: 'q1' });
             expect(queue2Messages[0].payload).toEqual({ data: 'q2' });
         });
+
+        it('should pass routingKey from message fields to onMessage', async () => {
+            let received: any;
+            await amqpQueue.consume('test.queue', async (event) => {
+                received = event;
+            });
+
+            (amqpQueue.channel as any).simulateIncomingMessage(
+                'test.queue',
+                { data: 'x' },
+                {
+                    messageId: 'id-1',
+                    type: 't',
+                    fields: { routingKey: 'orders.created' }
+                }
+            );
+
+            jest.runAllTimers();
+            await Promise.resolve();
+
+            expect(received.routingKey).toBe('orders.created');
+        });
+
+        it('should set routingKey to undefined when absent', async () => {
+            let received: any;
+            await amqpQueue.consume('test.queue', async (event) => {
+                received = event;
+            });
+
+            (amqpQueue.channel as any).simulateIncomingMessage('test.queue', { data: 'x' }, {
+                messageId: 'id-3',
+                type: 't'
+            });
+
+            jest.runAllTimers();
+            await Promise.resolve();
+
+            expect(received.routingKey).toBeUndefined();
+        });
     });
 
     describe('disconnect', () => {
