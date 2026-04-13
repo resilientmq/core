@@ -101,7 +101,16 @@ export class AmqpQueue implements MessageQueue {
                 /* istanbul ignore next */
                 const type = msg.properties.type || msg.properties.headers?.['x-event-type'];
 
-                await onMessage({ messageId, type, payload, status: EventConsumeStatus.RECEIVED, properties: msg.properties });
+                const routingKey = msg.fields?.routingKey || undefined;
+
+                await onMessage({
+                    messageId,
+                    type,
+                    payload,
+                    status: EventConsumeStatus.RECEIVED,
+                    properties: msg.properties,
+                    routingKey,
+                });
 
                 const channelWritable = this.isChannelWritable();
                 if (channelWritable) {
