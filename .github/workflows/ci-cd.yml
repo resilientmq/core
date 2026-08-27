@@ -380,7 +380,8 @@ jobs:
             echo "✅ New version ${{ steps.pkg.outputs.version }}"
           fi
 
-      - name: Create git tag
+      - name: Publish to NPM
+        id: npm-publish
         if: steps.version-check.outputs.exists == 'false'
         run: |
           git config user.name "github-actions[bot]"
@@ -394,11 +395,9 @@ jobs:
             git push origin "$TAG"
             echo "✅ Tag $TAG created"
           fi
-
       - name: Publish to NPM
         if: steps.version-check.outputs.exists == 'false'
         run: npm publish --access public
-
   summary:
     name: CI/CD Summary
     runs-on: ubuntu-latest

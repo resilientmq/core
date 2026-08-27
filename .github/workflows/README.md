@@ -26,6 +26,7 @@ unit-tests ──┐
 ### Publish conditions
 
 `publish` runs only on push to `main`/`master` and skips if the version in `package.json` is already on npm.
+If npm rejects publish with a package-permission 404, the job now emits a warning and skips tagging for that release attempt.
 
 ### npm Trusted Publisher
 
