@@ -18,7 +18,8 @@
 - **Consumer disposition**: ACK, reject and requeue are selected explicitly after durable state transitions and confirmed DLQ publication.
 - **Shutdown**: Consumers cancel deliveries, abort active handler signals and drain within `shutdownTimeoutMs`; publishers reject queued work and cannot reconnect behind an active disconnect.
 - **Store configuration**: Consumer and publisher configuration types require their corresponding atomic store specializations and validate the same contract at runtime.
-- **Toolchain**: Updated to `amqplib` 2.0.1, Testcontainers 12.1.0, Jest 30.4.2, TypeScript 6.0.3 and RabbitMQ 4.3.5 test infrastructure.
+- **Release authentication**: npm publication now uses OIDC Trusted Publishing with automatic provenance, while release tags use the scoped GitHub Actions token instead of long-lived npm or GitHub PAT secrets.
+- **Toolchain**: Updated to `amqplib` 2.0.1, Testcontainers 12.1.0, Jest 30.4.2, TypeScript 6.0.3, npm 12.0.2 for OIDC releases and RabbitMQ 4.3.5 test infrastructure.
 
 ### Fixed
 
