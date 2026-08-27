@@ -17,9 +17,22 @@ function getMemoryUsageMB(): number {
  * Helper function to force garbage collection if available.
  */
 function forceGC(): void {
-    if (global.gc) {
-        global.gc();
+    if (!global.gc) {
+        throw new Error('Memory leak stress tests require Node.js --expose-gc');
     }
+
+    global.gc();
+    global.gc();
+}
+
+/**
+ * Returns retained heap usage after completing two explicit garbage collections.
+ */
+async function getRetainedMemoryUsageMB(): Promise<number> {
+    forceGC();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    forceGC();
+    return getMemoryUsageMB();
 }
 
 describe('Stress Test: Memory Leak Detection', () => {
@@ -83,20 +96,17 @@ describe('Stress Test: Memory Leak Detection', () => {
                         const data = JSON.stringify(event);
                         JSON.parse(data);
                         
-                        processedCount++;
+                        const snapshotMessageCount = ++processedCount;
 
                         // Take memory snapshot every checkInterval messages
-                        if (processedCount % checkInterval === 0) {
-                            forceGC();
-                            await new Promise(resolve => setTimeout(resolve, 100));
-                            
-                            const memoryMB = getMemoryUsageMB();
+                        if (snapshotMessageCount % checkInterval === 0) {
+                            const memoryMB = await getRetainedMemoryUsageMB();
                             memorySnapshots.push({
-                                messageCount: processedCount,
+                                messageCount: snapshotMessageCount,
                                 memoryMB
                             });
                             
-                            console.log(`Processed ${processedCount} messages, Memory: ${memoryMB.toFixed(2)} MB`);
+                            console.log(`Processed ${snapshotMessageCount} messages, Memory: ${memoryMB.toFixed(2)} MB`);
                         }
                     }
                 }
@@ -104,14 +114,17 @@ describe('Stress Test: Memory Leak Detection', () => {
             prefetch: 50
         });
 
-        // Record initial memory
-        forceGC();
-        await new Promise(resolve => setTimeout(resolve, 100));
-        const initialMemory = getMemoryUsageMB();
-        console.log(`\nInitial Memory: ${initialMemory.toFixed(2)} MB`);
-
         // Start consumer
         await consumer.start();
+
+        await publisher.publish(createTestEvent({ warmup: true }, 'stress.test'));
+        while (processedCount < 1) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        processedCount = 0;
+
+        const initialMemory = await getRetainedMemoryUsageMB();
+        console.log(`\nInitial Memory: ${initialMemory.toFixed(2)} MB`);
 
         // Publish all messages
         console.log(`Publishing ${totalMessages} messages...`);
@@ -131,9 +144,7 @@ describe('Stress Test: Memory Leak Detection', () => {
         }
 
         // Final memory check
-        forceGC();
-        await new Promise(resolve => setTimeout(resolve, 100));
-        const finalMemory = getMemoryUsageMB();
+        const finalMemory = await getRetainedMemoryUsageMB();
         const memoryIncrease = finalMemory - initialMemory;
 
         console.log(`\nFinal Memory: ${finalMemory.toFixed(2)} MB`);

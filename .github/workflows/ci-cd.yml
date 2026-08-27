@@ -8,8 +8,10 @@ on:
       - 'test/**'
       - 'package.json'
       - 'package-lock.json'
+      - 'CHANGELOG.md'
       - 'tsconfig.json'
       - '.github/workflows/ci-cd.yml'
+      - '.github/workflows/release.yml'
   pull_request:
     branches: [main, master, develop]
     paths:
@@ -17,8 +19,15 @@ on:
       - 'test/**'
       - 'package.json'
       - 'package-lock.json'
+      - 'CHANGELOG.md'
       - 'tsconfig.json'
       - '.github/workflows/ci-cd.yml'
+      - '.github/workflows/release.yml'
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   NODE_VERSION: '24'
@@ -187,13 +196,13 @@ jobs:
             FAILED=0
             for file in test-results/stress-*.json; do
               ERROR_RATE=$(node -p "const d=require('./$file'); d.errorRate||0" 2>/dev/null || echo "0")
-              echo "$(basename $file): error rate = $ERROR_RATE%"
+              echo "$(basename "$file"): error rate = $ERROR_RATE%"
               if (( $(echo "$ERROR_RATE >= 1" | bc -l 2>/dev/null || echo "0") )); then
                 echo "❌ Error rate exceeds 1%"; FAILED=$((FAILED+1))
               fi
             done
-            [ $FAILED -eq 0 ] && echo "✅ All stress tests within threshold"
-            exit $FAILED
+            [ "$FAILED" -eq 0 ] && echo "✅ All stress tests within threshold"
+            exit "$FAILED"
           else
             echo "⚠️ No stress metrics found"
           fi
@@ -308,6 +317,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
+      - name: Validate npm package metadata
+        run: |
+          cp package.json /tmp/package.json.before
+          npm pkg fix
+          if ! cmp -s package.json /tmp/package.json.before; then
+            echo "::error::package.json is not normalized; run 'npm pkg fix' and commit the result"
+            git --no-pager diff -- package.json
+            exit 1
+          fi
+
       - run: npm ci
       - run: npm run build
 
@@ -329,79 +348,58 @@ jobs:
             README.md
           retention-days: 7
 
-  publish:
-    name: Publish to NPM
+  release:
+    name: Tag and start release
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
     permissions:
       contents: write
-      id-token: write
+      actions: write
 
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          registry-url: 'https://registry.npmjs.org/'
-          package-manager-cache: false
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: build-artifacts
-
-      - name: Install OIDC-compatible npm
-        run: npm install --global npm@12.0.2
-
-      - run: npm ci
-
-      - name: Get package info
-        id: pkg
+      - name: Read package version
+        id: package
         run: |
           VERSION=$(node -p 'require("./package.json").version')
-          NAME=$(node -p 'require("./package.json").name')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "📦 $NAME@$VERSION"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Check if version already published
-        id: version-check
+      - name: Check whether the version tag exists
+        id: tag
+        env:
+          VERSION_TAG: ${{ steps.package.outputs.tag }}
         run: |
-          PUBLISHED=$(npm view ${{ steps.pkg.outputs.name }}@${{ steps.pkg.outputs.version }} version 2>/dev/null || echo "")
-          if [ "$PUBLISHED" = "${{ steps.pkg.outputs.version }}" ]; then
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION_TAG" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "⚠️ Version ${{ steps.pkg.outputs.version }} already on npm — skipping"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "✅ New version ${{ steps.pkg.outputs.version }}"
           fi
 
-      - name: Publish to NPM
-        id: npm-publish
-        if: steps.version-check.outputs.exists == 'false'
+      - name: Create version tag
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          VERSION_TAG: ${{ steps.package.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          TAG="v${{ steps.pkg.outputs.version }}"
-          git fetch --tags --force
-          if git rev-parse "$TAG" >/dev/null 2>&1 || git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
-            echo "⚠️ Tag $TAG already exists"
-          else
-            git tag -a "$TAG" -m "Release $TAG"
-            git push origin "$TAG"
-            echo "✅ Tag $TAG created"
-          fi
-      - name: Publish to NPM
-        if: steps.version-check.outputs.exists == 'false'
-        run: npm publish --access public
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION_TAG" -m "Release $VERSION_TAG"
+          git push origin "$VERSION_TAG"
+
+      - name: Start release workflow
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_TAG: ${{ steps.package.outputs.tag }}
+        run: gh workflow run release.yml --ref "$VERSION_TAG" -f dry_run=false
+
   summary:
     name: CI/CD Summary
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, stress-tests, benchmarks, build, publish]
+    needs: [unit-tests, integration-tests, stress-tests, benchmarks, build, release]
     if: always()
 
     steps:
@@ -459,7 +457,7 @@ jobs:
             ['Stress Tests',      '${{ needs.stress-tests.result }}'],
             ['Benchmarks',        '${{ needs.benchmarks.result }}'],
             ['Build',             '${{ needs.build.result }}'],
-            ['Publish',           '${{ needs.publish.result }}'],
+            ['Release',           '${{ needs.release.result }}'],
           ];
           for (const [name, result] of jobs) {
             push(`| ${name} | ${jobIcon(result)} ${result} |`);

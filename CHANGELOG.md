@@ -19,10 +19,11 @@
 - **Shutdown**: Consumers cancel deliveries, abort active handler signals and drain within `shutdownTimeoutMs`; publishers reject queued work and cannot reconnect behind an active disconnect.
 - **Store configuration**: Consumer and publisher configuration types require their corresponding atomic store specializations and validate the same contract at runtime.
 - **Release authentication**: npm publication now uses OIDC Trusted Publishing with automatic provenance, while release tags use the scoped GitHub Actions token instead of long-lived npm or GitHub PAT secrets.
-- **Toolchain**: Updated to `amqplib` 2.0.1, Testcontainers 12.1.0, Jest 30.4.2, TypeScript 6.0.3, npm 12.0.2 for OIDC releases and RabbitMQ 4.3.5 test infrastructure.
+- **Toolchain**: Updated to `amqplib` 2.0.1, Testcontainers 12.1.0, Jest 30.4.2, TypeScript 6.0.3, an OIDC-capable npm 11 release and RabbitMQ 4.3.5 test infrastructure.
 
 ### Fixed
 
+- Replaced token-based npm publication with OIDC trusted publishing, made publish failures fatal and added package metadata normalization checks before release.
 - Prevented retry or DLQ publication failures from ACKing and losing the original delivery.
 - Prevented connection redelivery from consuming a business retry attempt or being classified as a completed duplicate.
 - Prevented permanent `RECEIVED` or `PROCESSING` rows through recoverable leases and fenced transitions.
@@ -59,6 +60,7 @@
 
 ### Testing
 
+- Memory leak stress checks now run with explicit garbage collection, warm up long-lived connections before the baseline and compare retained heap at deterministic message counts.
 - `145` unit tests passed with `89.70%` line and `73.70%` branch coverage.
 - `37` integration tests passed against RabbitMQ 4.3.5, including retry, DLQ, reconnection, routing, persistence and cleanup scenarios.
 - `8` stress tests passed, including `10000` confirmed publications with zero errors, `10000` unique consumptions with zero duplicates and balanced delivery across five consumers.
