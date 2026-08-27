@@ -3,18 +3,22 @@ import { ResilientEventPublisher } from '../../src/resilience/resilient-event-pu
 import { TestContainersManager } from '../utils/test-containers';
 import { EventStoreMock } from '../utils/event-store-mock';
 import { ConsumerConfigBuilder, PublisherConfigBuilder, EventBuilder } from '../utils/test-data-builders';
+import {RabbitMQHelpers} from '../utils/rabbitmq-helpers';
 
 describe('Integration: Resource Cleanup Validation', () => {
     let containerManager: TestContainersManager;
     let connectionUrl: string;
+    let rabbitMQHelpers: RabbitMQHelpers;
 
     beforeAll(async () => {
         containerManager = new TestContainersManager();
         await containerManager.startRabbitMQ();
         connectionUrl = containerManager.getConnectionUrl();
+        rabbitMQHelpers = new RabbitMQHelpers(connectionUrl);
     }, 60000);
 
     afterAll(async () => {
+        await rabbitMQHelpers.disconnect();
         // Verify container cleanup
         await containerManager.stopAll();
         
@@ -47,7 +51,7 @@ describe('Integration: Resource Cleanup Validation', () => {
         expect(queue.channel).toBeDefined();
 
         // Cleanup
-        await queue.disconnect();
+        await consumer.stop();
 
         // Assert - Connection should be closed
         expect(queue.closed).toBe(true);
@@ -58,6 +62,7 @@ describe('Integration: Resource Cleanup Validation', () => {
     it('should properly cleanup publisher connections in afterEach', async () => {
         // Arrange
         const store = new EventStoreMock();
+        await rabbitMQHelpers.assertQueue('test.cleanup.publisher.queue');
         const publisherConfig = new PublisherConfigBuilder()
             .withConnection(connectionUrl)
             .withQueue('test.cleanup.publisher.queue')
@@ -76,7 +81,7 @@ describe('Integration: Resource Cleanup Validation', () => {
         await publisher.publish(event);
 
         // Cleanup
-        publisher.stopPendingEventsCheck();
+        await publisher.disconnect();
 
         // Assert - Pending events check should be stopped
         const interval = (publisher as any).pendingEventsInterval;
@@ -144,7 +149,7 @@ describe('Integration: Resource Cleanup Validation', () => {
             clearInterval(heartbeatTimer);
         }
 
-        await (consumer as any).queue?.disconnect();
+        await consumer.stop();
 
         // Assert - Timers should be cleared
         // This validates that cleanup properly stops all background processes
@@ -169,12 +174,12 @@ describe('Integration: Resource Cleanup Validation', () => {
         await consumer.start();
 
         // Act - Try to cleanup even if connection is already closed
-        await (consumer as any).queue?.disconnect();
+        await consumer.stop();
 
         // Try to disconnect again (should handle gracefully)
         let cleanupError = null;
         try {
-            await (consumer as any).queue?.disconnect();
+            await consumer.stop();
         } catch (error) {
             cleanupError = error;
         }

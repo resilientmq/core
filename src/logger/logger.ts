@@ -66,7 +66,6 @@ function applyProductionSamplingDefaults(): void {
         return;
     }
 
-    // High-throughput defaults; explicit env vars always win.
     if (typeof process !== 'undefined') {
         if (process.env?.RESILIENTMQ_LOG_SAMPLE_INFO === undefined) {
             sampleEveryByLevel.info = 50;

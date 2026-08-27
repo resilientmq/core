@@ -31,7 +31,7 @@ describe('Integration: Publish Modes (Instant vs Deferred)', () => {
     afterEach(async () => {
         if (publisher) {
             try {
-                publisher.stopPendingEventsCheck();
+                await publisher.disconnect();
             } catch (error) {
                 // Ignore cleanup errors
             }
@@ -41,6 +41,7 @@ describe('Integration: Publish Modes (Instant vs Deferred)', () => {
 
     describe('Instant Publish (instantPublish: true)', () => {
         it('should publish immediately with store', async () => {
+            await rabbitMQHelpers.assertQueue('test.instant.queue');
             const event = new EventBuilder()
                 .withType('test.instant')
                 .withPayload({ data: 'instant' })
@@ -65,6 +66,7 @@ describe('Integration: Publish Modes (Instant vs Deferred)', () => {
         }, 10000);
 
         it('should publish immediately without store', async () => {
+            await rabbitMQHelpers.assertQueue('test.instant.no.store.queue');
             const event = new EventBuilder()
                 .withType('test.instant.no.store')
                 .withPayload({ data: 'instant' })
@@ -112,6 +114,7 @@ describe('Integration: Publish Modes (Instant vs Deferred)', () => {
         }, 10000);
 
         it('should process pending events and publish them', async () => {
+            await rabbitMQHelpers.assertQueue('test.pending.queue');
             const event1 = new EventBuilder()
                 .withType('test.pending')
                 .withPayload({ id: 1 })
@@ -157,6 +160,7 @@ describe('Integration: Publish Modes (Instant vs Deferred)', () => {
         }, 10000);
 
         it('should process pending events in chronological order', async () => {
+            await rabbitMQHelpers.assertQueue('test.order.queue');
             const now = Date.now();
             const event1 = new EventBuilder()
                 .withType('test.order')
@@ -207,6 +211,7 @@ describe('Integration: Publish Modes (Instant vs Deferred)', () => {
 
     describe('Mixed Mode', () => {
         it('should handle both instant and deferred publishing', async () => {
+            await rabbitMQHelpers.assertQueue('test.mixed.queue');
             const instantEvent = new EventBuilder()
                 .withType('test.mixed.instant')
                 .withPayload({ type: 'instant' })

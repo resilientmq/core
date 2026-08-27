@@ -1,3 +1,5 @@
+import amqplib from 'amqplib';
+
 /**
  * Utility functions for interacting with RabbitMQ in integration tests.
  * Provides helpers for queue management, message inspection, and connection testing.
@@ -17,8 +19,7 @@ export class RabbitMQHelpers {
      */
     private async ensureChannel(): Promise<any> {
         if (!this.connection) {
-            const amqp = await import('amqplib');
-            this.connection = await amqp.connect(this.connectionUrl);
+            this.connection = await amqplib.connect(this.connectionUrl);
         }
         if (!this.channel) {
             this.channel = await this.connection.createChannel();
@@ -60,6 +61,12 @@ export class RabbitMQHelpers {
         } catch (error) {
             // Queue might not exist, ignore error
         }
+    }
+
+    /** Declares a durable queue for recovery scenarios. */
+    async assertQueue(queue: string): Promise<void> {
+        const channel = await this.ensureChannel();
+        await channel.assertQueue(queue, {durable: true});
     }
 
     /**

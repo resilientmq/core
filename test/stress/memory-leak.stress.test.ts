@@ -73,7 +73,7 @@ describe('Stress Test: Memory Leak Detection', () => {
             connection: connectionUrl,
             consumeQueue: {
                 queue: testQueue,
-                options: { durable: false }
+                options: { durable: true }
             },
             eventsToProcess: [
                 {

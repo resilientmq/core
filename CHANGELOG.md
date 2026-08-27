@@ -1,3 +1,77 @@
+# [3.0.0] - 2026-08-27
+
+### Added
+
+- **Confirmed AMQP transport**: Publications now use a long-lived confirm channel, mandatory routing, per-message confirm deadlines, returned-message detection and shared channel backpressure.
+- **Broker-owned retry accounting**: Consumer attempts are derived exclusively from RabbitMQ `x-death`, `x-delivery-count` and `x-acquired-count` metadata. Application-provided retry counters are ignored.
+- **Fenced inbox and outbox contracts**: Added atomic claims, expiring leases and fencing tokens for safe multi-replica processing and recovery.
+- **Runtime identities**: Added a stable SHA-256 service identity and an ephemeral process instance identifier to processing context, publications, claims and metric events.
+- **Cooperative cancellation**: Event handlers now receive an `EventProcessingContext` with an `AbortSignal`, delivery attempt and fencing identity.
+- **Event-oriented metrics**: Added compact resilience events, pluggable metric sinks and `BufferedMetricsSink` for storage-backed metric processing outside ACK and confirm paths.
+- **Resilience documentation**: Added the consumer, publisher, connection and shutdown state model in `docs/resilience-model.md`.
+
+### Changed
+
+- **Connection recovery**: Replaced application polling with AMQP heartbeat and connection/channel lifecycle events, bounded exponential backoff and jitter.
+- **Publishing lifecycle**: Connections remain open until explicit disconnect, and successful publication now means a positive RabbitMQ confirm rather than a socket write.
+- **Outbox processing**: Pending rows are claimed atomically across replicas. Publication rate limiting is optional and no artificial rate is applied when it is omitted.
+- **Consumer disposition**: ACK, reject and requeue are selected explicitly after durable state transitions and confirmed DLQ publication.
+- **Shutdown**: Consumers cancel deliveries, abort active handler signals and drain within `shutdownTimeoutMs`; publishers reject queued work and cannot reconnect behind an active disconnect.
+- **Store configuration**: Consumer and publisher configuration types require their corresponding atomic store specializations and validate the same contract at runtime.
+- **Toolchain**: Updated to `amqplib` 2.0.1, Testcontainers 12.1.0, Jest 30.4.2, TypeScript 6.0.3 and RabbitMQ 4.3.5 test infrastructure.
+
+### Fixed
+
+- Prevented retry or DLQ publication failures from ACKing and losing the original delivery.
+- Prevented connection redelivery from consuming a business retry attempt or being classified as a completed duplicate.
+- Prevented permanent `RECEIVED` or `PROCESSING` rows through recoverable leases and fenced transitions.
+- Prevented stale handlers and stopped replicas from overwriting a newer claim owner.
+- Prevented publisher replicas from selecting and publishing the same pending outbox row concurrently.
+- Prevented unroutable publications and negative confirms from appearing successful.
+- Prevented malformed messages and forged retry headers from creating unbounded or skipped retry flows.
+- Prevented hooks and metric sinks from changing durable ACK or publication outcomes when they fail.
+- Prevented queued publisher calls from reopening a connection during bounded shutdown.
+- Prevented stale build output from being included in the npm package.
+
+### Removed
+
+- Removed application heartbeat polling, maximum-uptime restarts, idle-exit monitoring and process-level signal handlers.
+- Removed publisher connection pools, separate pending lanes, adaptive concurrency controls and idle connection timers.
+- Removed the legacy `DLQHandler`; final DLQ publication is now part of the processor's confirmed disposition flow.
+- Removed `heartbeatIntervalMs`, `maxUptimeMs`, `exitIfIdle`, `idleCheckIntervalMs`, `maxIdleChecks`, cleanup-consumer options, `maxConnections` and related pending-pool options.
+
+### Breaking Changes
+
+- Stores supplied to consumers must implement `claimConsumeEvent` and `transitionConsumeEvent` atomically.
+- Stores supplied to publishers must implement `saveEventIfNotExists`, `claimPublishEvent`, `completePublishedEvent` and `releasePublishEvent`; deferred mode also requires `claimPendingEvents`.
+- Removed lifecycle, idle and publisher-pool configuration fields are no longer accepted.
+- The library no longer installs `SIGINT` or `SIGTERM` handlers; the host application owns process shutdown and must call `stop()` or `disconnect()`.
+- Publication failures that were previously hidden now reject, including missing routes, negative confirms, confirm timeouts and connection loss.
+- Reliable delivery semantics are at-least-once. A confirm lost during a network failure or a database transition lost after a confirm can produce a duplicate, so handlers and stores must remain idempotent.
+
+### Performance
+
+- Consumer benchmark with a 10 ms overlapping handler: prefetch `1`, `10`, `100`, `1000` produced approximately `67`, `553`, `1747`, `1563` messages/second.
+- Publisher confirm concurrency `1`, `10`, `100`, `1000` produced approximately `410`, `2089`, `4745`, `6181` messages/second.
+- Two concurrent outbox replicas published exactly `2000` claimed rows as `2000` RabbitMQ messages at approximately `1135` messages/second.
+- The fenced EventStore path measured approximately `15.3%` overhead in the final benchmark run.
+
+### Testing
+
+- `145` unit tests passed with `89.70%` line and `73.70%` branch coverage.
+- `37` integration tests passed against RabbitMQ 4.3.5, including retry, DLQ, reconnection, routing, persistence and cleanup scenarios.
+- `8` stress tests passed, including `10000` confirmed publications with zero errors, `10000` unique consumptions with zero duplicates and balanced delivery across five consumers.
+- `27` benchmark tests passed for prefetch, confirm concurrency, distributed outbox, EventStore overhead, middleware and end-to-end latency.
+- `npm audit` reports zero known vulnerabilities.
+
+### Migration Notes
+
+- Replace legacy store reads and status updates with the atomic claim and fenced transition methods documented in `README.md`.
+- Remove obsolete idle, heartbeat, uptime and connection-pool options from consumer and publisher configuration.
+- Accept and honor `EventProcessingContext.signal` in long-running handlers so shutdown and connection replacement can cancel work cooperatively.
+- Treat `messageId` as a stable idempotency key across publication retries and consumer redeliveries.
+- See `docs/resilience-model.md` for state transitions, failure ordering and at-least-once limitations.
+
 # [2.3.1] - 2026-04-13
 
 ### Added

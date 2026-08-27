@@ -1,4 +1,13 @@
-import { EventStore } from '../../src/types/resilience/event-store';
+import {
+    ClaimedPublishEvent,
+    ConsumeClaimRequest,
+    ConsumeClaimResult,
+    ConsumeTransitionRequest,
+    EventStore,
+    PublishClaimRequest,
+    PublishEventClaimRequest,
+    PublishTransitionRequest
+} from '../../src/types/resilience/event-store';
 import { EventMessage } from '../../src/types/resilience/event-message';
 import { EventConsumeStatus } from '../../src/types/enum/event-consume-status';
 import { EventPublishStatus } from '../../src/types/enum/event-publish-status';
@@ -16,6 +25,10 @@ export class EventStoreMock implements EventStore {
     private failOnDelete: boolean = false;
     private failOnGetPending: boolean = false;
     private failOnGetByStatus: boolean = false;
+    private consumeClaims = new Map<string, {token: string; instanceId: string; expiresAt: number}>();
+    private publishClaims = new Map<string, {token: string; instanceId: string; expiresAt: number}>();
+    private nextPublishAttempt = new Map<string, number>();
+    private tokenSequence = 0;
 
     /**
      * Simulates failures on saveEvent calls.
@@ -180,6 +193,84 @@ export class EventStoreMock implements EventStore {
         }
     }
 
+    async claimConsumeEvent(request: ConsumeClaimRequest): Promise<ConsumeClaimResult> {
+        this.incrementCallCount('claimConsumeEvent');
+        const id = request.event.messageId;
+        const existing = this.events.get(id);
+        if (existing?.status === EventConsumeStatus.DONE || existing?.status === EventConsumeStatus.ERROR) {
+            return {outcome: 'completed'};
+        }
+        const current = this.consumeClaims.get(id);
+        if (current && current.expiresAt > request.now) {
+            return {outcome: 'busy', leaseExpiresAt: current.expiresAt};
+        }
+        const token = `consume-${++this.tokenSequence}`;
+        const expiresAt = request.now + request.leaseDurationMs;
+        this.consumeClaims.set(id, {token, instanceId: request.instanceId, expiresAt});
+        this.events.set(id, {...request.event, status: EventConsumeStatus.PROCESSING});
+        return {outcome: 'acquired', fencingToken: token, leaseExpiresAt: expiresAt};
+    }
+
+    async transitionConsumeEvent(request: ConsumeTransitionRequest): Promise<boolean> {
+        this.incrementCallCount('transitionConsumeEvent');
+        if (this.failOnUpdate) throw new Error('EventStore: transitionConsumeEvent failed (simulated)');
+        const claim = this.consumeClaims.get(request.event.messageId);
+        if (!claim || claim.token !== request.fencingToken || claim.instanceId !== request.instanceId) return false;
+        const event = this.events.get(request.event.messageId) ?? request.event;
+        this.events.set(request.event.messageId, {...event, status: request.status});
+        this.consumeClaims.delete(request.event.messageId);
+        return true;
+    }
+
+    async claimPendingEvents(request: PublishClaimRequest): Promise<ClaimedPublishEvent[]> {
+        this.incrementCallCount('claimPendingEvents');
+        if (this.failOnGetPending) throw new Error('EventStore: claimPendingEvents failed (simulated)');
+        const claimed: ClaimedPublishEvent[] = [];
+        for (const event of this.events.values()) {
+            if (claimed.length >= request.limit) break;
+            if (event.status !== EventPublishStatus.PENDING) continue;
+            if ((this.nextPublishAttempt.get(event.messageId) ?? 0) > request.now) continue;
+            const current = this.publishClaims.get(event.messageId);
+            if (current && current.expiresAt > request.now) continue;
+            const claim = this.createPublishClaim(event, request.instanceId, request.now, request.leaseDurationMs);
+            claimed.push(claim);
+        }
+        return claimed;
+    }
+
+    async claimPublishEvent(request: PublishEventClaimRequest): Promise<ClaimedPublishEvent | null> {
+        this.incrementCallCount('claimPublishEvent');
+        const event = this.events.get(request.event.messageId);
+        if (!event || event.status !== EventPublishStatus.PENDING) return null;
+        if ((this.nextPublishAttempt.get(event.messageId) ?? 0) > request.now) return null;
+        const current = this.publishClaims.get(event.messageId);
+        if (current && current.expiresAt > request.now) return null;
+        return this.createPublishClaim(event, request.instanceId, request.now, request.leaseDurationMs);
+    }
+
+    async completePublishedEvent(request: PublishTransitionRequest): Promise<boolean> {
+        this.incrementCallCount('completePublishedEvent');
+        if (this.failOnUpdate) throw new Error('EventStore: completePublishedEvent failed (simulated)');
+        const claim = this.publishClaims.get(request.event.messageId);
+        if (!claim || claim.token !== request.fencingToken || claim.instanceId !== request.instanceId) return false;
+        const event = this.events.get(request.event.messageId) ?? request.event;
+        this.events.set(request.event.messageId, {...event, status: EventPublishStatus.PUBLISHED});
+        this.publishClaims.delete(request.event.messageId);
+        this.nextPublishAttempt.delete(request.event.messageId);
+        return true;
+    }
+
+    async releasePublishEvent(request: PublishTransitionRequest): Promise<boolean> {
+        this.incrementCallCount('releasePublishEvent');
+        const claim = this.publishClaims.get(request.event.messageId);
+        if (!claim || claim.token !== request.fencingToken || claim.instanceId !== request.instanceId) return false;
+        const event = this.events.get(request.event.messageId) ?? request.event;
+        this.events.set(request.event.messageId, {...event, status: EventPublishStatus.PENDING});
+        this.publishClaims.delete(request.event.messageId);
+        this.nextPublishAttempt.set(request.event.messageId, request.nextAttemptAt ?? request.now);
+        return true;
+    }
+
     /**
      * Clears all stored events and resets call counts.
      * Useful for test cleanup between test cases.
@@ -193,6 +284,10 @@ export class EventStoreMock implements EventStore {
         this.failOnDelete = false;
         this.failOnGetPending = false;
         this.failOnGetByStatus = false;
+        this.consumeClaims.clear();
+        this.publishClaims.clear();
+        this.nextPublishAttempt.clear();
+        this.tokenSequence = 0;
     }
 
     /**
@@ -222,5 +317,17 @@ export class EventStoreMock implements EventStore {
     private incrementCallCount(method: string): void {
         const current = this.callCounts.get(method) || 0;
         this.callCounts.set(method, current + 1);
+    }
+
+    private createPublishClaim(
+        event: EventMessage,
+        instanceId: string,
+        now: number,
+        leaseDurationMs: number
+    ): ClaimedPublishEvent {
+        const token = `publish-${++this.tokenSequence}`;
+        const leaseExpiresAt = now + leaseDurationMs;
+        this.publishClaims.set(event.messageId, {token, instanceId, expiresAt: leaseExpiresAt});
+        return {event: {...event}, fencingToken: token, leaseExpiresAt};
     }
 }

@@ -1,4 +1,5 @@
 import { RabbitMQContainer, StartedRabbitMQContainer } from '@testcontainers/rabbitmq';
+import amqplib from 'amqplib';
 
 /**
  * Manages the lifecycle of Docker containers for integration tests.
@@ -14,7 +15,7 @@ export class TestContainersManager {
      */
     async startRabbitMQ(): Promise<StartedRabbitMQContainer> {
         try {
-            this.rabbitMQContainer = await new RabbitMQContainer('rabbitmq:3.12-management')
+            this.rabbitMQContainer = await new RabbitMQContainer('rabbitmq:4.3.5-management')
                 .withExposedPorts(5672, 15672)
                 .start();
 
@@ -73,8 +74,7 @@ export class TestContainersManager {
         while (Date.now() - startTime < timeoutMs) {
             try {
                 // Try to connect using amqplib
-                const amqp = await import('amqplib');
-                const connection = await amqp.connect(this.getConnectionUrl());
+                const connection = await amqplib.connect(this.getConnectionUrl());
                 await connection.close();
                 return; // Success
             } catch (error) {

@@ -29,14 +29,14 @@ describe('Integration: Multiple Exchanges and Routing Keys', () => {
     afterEach(async () => {
         if (consumer) {
             try {
-                await (consumer as any).queue?.disconnect();
+                await consumer.stop();
             } catch (error) {
                 // Ignore cleanup errors
             }
         }
         if (publisher) {
             try {
-                publisher.stopPendingEventsCheck();
+                await publisher.disconnect();
             } catch (error) {
                 // Ignore cleanup errors
             }
@@ -104,7 +104,7 @@ describe('Integration: Multiple Exchanges and Routing Keys', () => {
         
         await publisher.publish(matchingEvent1);
         await publisher.publish(matchingEvent2);
-        await publisher.publish(nonMatchingEvent);
+        await expect(publisher.publish(nonMatchingEvent)).rejects.toThrow('unroutable');
 
         // Wait for processing
         await new Promise(resolve => setTimeout(resolve, 3000));
@@ -171,8 +171,8 @@ describe('Integration: Multiple Exchanges and Routing Keys', () => {
         await new Promise(resolve => setTimeout(resolve, 500));
         
         await publisher.publish(criticalEvent);
-        await publisher.publish(warningEvent);
-        await publisher.publish(infoEvent);
+        await expect(publisher.publish(warningEvent)).rejects.toThrow('unroutable');
+        await expect(publisher.publish(infoEvent)).rejects.toThrow('unroutable');
 
         // Wait for processing
         await new Promise(resolve => setTimeout(resolve, 3000));
@@ -252,8 +252,8 @@ describe('Integration: Multiple Exchanges and Routing Keys', () => {
         expect(consumer2Messages[0]).toEqual({ announcement: 'System maintenance scheduled' });
 
         // Cleanup
-        await (consumer1 as any).queue?.disconnect();
-        await (consumer2 as any).queue?.disconnect();
+        await consumer1.stop();
+        await consumer2.stop();
     }, 30000);
 
     it('should handle consumer with multiple exchange bindings', async () => {
@@ -335,7 +335,7 @@ describe('Integration: Multiple Exchanges and Routing Keys', () => {
         expect(receivedMessages).toContainEqual({ source: 'exchange2' });
 
         // Cleanup
-        publisher1.stopPendingEventsCheck();
-        publisher2.stopPendingEventsCheck();
+        await publisher1.disconnect();
+        await publisher2.disconnect();
     }, 30000);
 });

@@ -55,8 +55,7 @@ describe('Integration: Automatic Reconnection', () => {
             .withConnection(connectionUrl)
             .withQueue('test.reconnect.simple.queue')
             .withStore(store)
-            .withReconnectDelayMs(1000) // 1 second reconnect delay
-            .withMaxUptimeMs(5000) // 5 seconds max uptime
+            .withReconnectDelayMs(1000)
             .withEventHandler('reconnect.event', async (event) => {
                 receivedMessages.push(event.payload);
             })

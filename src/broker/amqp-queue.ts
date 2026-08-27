@@ -1,208 +1,436 @@
-import amqplib, { Channel, ChannelModel, Options } from 'amqplib';
-import { log } from '../logger/logger';
-import { EventConsumeStatus, EventMessage, MessageQueue, PublishOptions } from '../types';
+import amqplib, {
+    ChannelModel,
+    ConfirmChannel,
+    ConsumeMessage,
+    Options
+} from 'amqplib';
+import {randomUUID} from 'crypto';
+import {log} from '../logger/logger';
+import {
+    DeliveryDisposition,
+    EventConsumeStatus,
+    EventMessage,
+    EventProperties,
+    MessageQueue,
+    MessageQueueDisconnect,
+    PublishOptions,
+    RawMessageDelivery
+} from '../types';
 
-/**
- * AMQP-compliant implementation of the MessageQueue interface.
- * Manages connection lifecycle, publishing, consuming, and graceful shutdown.
- */
+/** AMQP transport with publisher confirms, mandatory routing and raw delivery control. */
 export class AmqpQueue implements MessageQueue {
-    private _connection!: ChannelModel;
-    private _channel!: Channel;
+    private _connection?: ChannelModel;
+    private _channel?: ConfirmChannel;
     private _prefetchCount = 1;
-    private readonly consumerTags: Map<string, string> = new Map();
+    private readonly consumerTags = new Map<string, string>();
+    private readonly disconnectListeners = new Set<(disconnect: MessageQueueDisconnect) => void>();
+    private readonly exchangeAssertions = new Map<string, Promise<void>>();
+    private readonly pendingPublications = new Map<string, (error: Error) => void>();
+    private drainGate?: Promise<void>;
     private _processingMessages = 0;
     private _pendingAcks = 0;
-    public closed = false;
+    private closing = false;
+    public closed = true;
 
     constructor(private readonly connConfig: string | Options.Connect) {}
 
-    /* istanbul ignore next */
-    get connection(): ChannelModel { return this._connection; }
-    /* istanbul ignore next */
-    get channel(): Channel { return this._channel; }
-    /* istanbul ignore next */
+    /** Active AMQP connection. */
+    get connection(): ChannelModel {
+        if (!this._connection) throw new Error('[AMQP] Connection is not established');
+        return this._connection;
+    }
+
+    /** Active confirm channel. */
+    get channel(): ConfirmChannel {
+        if (!this._channel) throw new Error('[AMQP] Channel is not established');
+        return this._channel;
+    }
+
+    /** Configured consumer prefetch. */
     get prefetchCount(): number { return this._prefetchCount; }
-    /* istanbul ignore next */
+
+    /** Number of delivery handlers currently executing. */
     get processingMessages(): number { return this._processingMessages; }
-    /* istanbul ignore next */
+
+    /** Number of AMQP dispositions currently being written. */
     get pendingAcks(): number { return this._pendingAcks; }
 
-    /**
-     * Connects to the AMQP broker and creates a channel with the given prefetch.
-     */
+    /** Establishes a heartbeat-protected AMQP connection and confirm channel. */
     async connect(prefetch = 1): Promise<void> {
+        if (!Number.isInteger(prefetch) || prefetch < 0) {
+            throw new Error('[AMQP] Prefetch must be a non-negative integer');
+        }
+
         this._prefetchCount = prefetch;
+        this.closing = false;
+        this.exchangeAssertions.clear();
+        this.drainGate = undefined;
+
         try {
-            this._connection = await amqplib.connect(this.connConfig);
-            this._connection.removeAllListeners('error');
-            this._connection.on('close', () => { this.closed = true; log('debug', '[AMQP] Connection closed'); });
-            this._connection.on('error', (err) => { this.closed = true; log('error', '[AMQP] Connection error', err); });
+            const connection = await amqplib.connect(this.withDefaultHeartbeat(this.connConfig));
+            this._connection = connection;
+            connection.on('close', () => this.handleDisconnect('connection'));
+            connection.on('error', (error: Error) => this.handleDisconnect('connection', error));
 
-            this._channel = await this._connection.createChannel();
-            this._channel.on('close', () => log('debug', '[AMQP] Channel closed'));
-            this._channel.on('error', (err) => log('error', '[AMQP] Channel error', err));
+            const channel = await connection.createConfirmChannel();
+            this._channel = channel;
+            channel.on('return', (message: ConsumeMessage) => this.handleReturnedMessage(message));
+            channel.on('close', () => this.handleDisconnect('channel'));
+            channel.on('error', (error: Error) => this.handleDisconnect('channel', error));
 
-            await this._channel.prefetch(this._prefetchCount);
+            await channel.prefetch(prefetch);
             this.closed = false;
-            log('debug', '[AMQP] Connection established successfully');
+            log('debug', '[AMQP] Confirm channel established');
         } catch (error) {
             this.closed = true;
+            await this.closeResources(true);
             log('error', '[AMQP] Failed to connect', error);
             throw error;
         }
     }
 
-    /**
-     * Publishes an event to a queue or exchange.
-     */
+    /** Publishes an event and resolves only after RabbitMQ confirms it. */
     async publish(destination: string, event: EventMessage, options?: PublishOptions): Promise<void> {
-        const channel = this._channel;
-        const content = Buffer.from(JSON.stringify(event.payload));
-        /* istanbul ignore next */
-        const eventProperties = event.properties;
-        const existingHeaders = eventProperties?.headers ?? {};
-        const props = {
-            ...(eventProperties ?? {}),
-            messageId: event.messageId,
-            type: event.type,
-            persistent: true,
-            headers: {
-                ...existingHeaders,
-                'x-message-id': event.messageId,
-                'x-event-type': event.type,
+        const headers = event.properties?.headers ?? {};
+        await this.publishRaw(
+            destination,
+            Buffer.from(JSON.stringify(event.payload)),
+            {
+                ...event.properties,
+                messageId: event.messageId,
+                type: event.type,
+                headers: {
+                    ...headers,
+                    'x-message-id': event.messageId,
+                    'x-event-type': event.type
+                }
             },
+            event.routingKey === undefined ? options : {...options, routingKey: event.routingKey}
+        );
+    }
+
+    /** Publishes an unmodified body with mandatory routing and a publisher confirm. */
+    async publishRaw(
+        destination: string,
+        content: Buffer,
+        properties: EventProperties = {},
+        options?: PublishOptions
+    ): Promise<void> {
+        if (this.closed || !this._channel) {
+            throw new Error('[AMQP] Cannot publish while the channel is closed');
+        }
+
+        const channel = this._channel;
+        const publicationId = randomUUID();
+        const headers = {
+            ...(properties.headers ?? {}),
+            'x-resilientmq-publication-id': publicationId
+        };
+        const publishProperties: Options.Publish = {
+            ...properties,
+            headers,
+            deliveryMode: properties.deliveryMode ?? 2,
+            mandatory: true
         };
 
         if (options?.exchange) {
-            const { name, type, options: exchangeOptions } = options.exchange;
-            await channel.assertExchange(name, type, exchangeOptions);
-            channel.publish(name, event.routingKey ?? '', content, props);
-        } else {
-            channel.sendToQueue(destination, content, props);
+            await this.assertExchange(options.exchange);
+        }
+
+        const confirmTimeoutMs = options?.confirmTimeoutMs ?? 10000;
+        if (!Number.isFinite(confirmTimeoutMs) || confirmTimeoutMs <= 0) {
+            throw new Error('[AMQP] Publisher confirm timeout must be positive');
+        }
+        if (this.drainGate) await this.drainGate;
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        let rejectPublication: ((error: Error) => void) | undefined;
+
+        let drained = Promise.resolve();
+        const confirmed = new Promise<void>((resolve, reject) => {
+            let settled = false;
+            const settle = (error?: Error) => {
+                if (settled) return;
+                settled = true;
+                if (timeout) clearTimeout(timeout);
+                this.pendingPublications.delete(publicationId);
+                if (error) reject(error); else resolve();
+            };
+
+            rejectPublication = (error: Error) => settle(error);
+            this.pendingPublications.set(publicationId, rejectPublication);
+            timeout = setTimeout(
+                () => settle(new Error(`[AMQP] Publisher confirm timed out after ${confirmTimeoutMs}ms`)),
+                confirmTimeoutMs
+            );
+
+            const callback = (error: unknown) => {
+                if (error instanceof Error) settle(error);
+                else if (error) settle(new Error(String(error)));
+                else settle();
+            };
+
+            try {
+                const writable = options?.exchange
+                    ? channel.publish(
+                        options.exchange.name,
+                        options.routingKey ?? '',
+                        content,
+                        publishProperties,
+                        callback
+                    )
+                    : channel.sendToQueue(destination, content, publishProperties, callback);
+
+                if (!writable) {
+                    const drain = this.waitForDrain(channel, confirmTimeoutMs);
+                    let gate!: Promise<void>;
+                    gate = drain.finally(() => {
+                        if (this.drainGate === gate) this.drainGate = undefined;
+                    });
+                    this.drainGate = gate;
+                    drained = gate;
+                }
+            } catch (error) {
+                settle(error instanceof Error ? error : new Error(String(error)));
+            }
+        });
+
+        try {
+            await Promise.all([confirmed, drained]);
+        } catch (error) {
+            rejectPublication?.(error instanceof Error ? error : new Error(String(error)));
+            throw error;
         }
     }
 
-    /**
-     * Subscribes to a queue and invokes the handler for each message.
-     * Acks on success, nacks (no requeue) on failure to trigger DLX routing.
-     */
+    /** Consumes JSON events while retaining the legacy handler contract. */
     async consume(queue: string, onMessage: (event: EventMessage) => Promise<void>): Promise<void> {
-        const channel = this._channel;
-        const { consumerTag } = await channel.consume(queue, async (msg) => {
-            /* istanbul ignore next */
-            if (!msg) return;
-
-            this._processingMessages++;
+        await this.consumeRaw(queue, async (delivery) => {
             try {
-                const payload = JSON.parse(msg.content.toString());
-                /* istanbul ignore next */
-                const messageId = msg.properties.messageId || msg.properties.headers?.['x-message-id'];
-                /* istanbul ignore next */
-                const type = msg.properties.type || msg.properties.headers?.['x-event-type'];
-
-                const routingKey = msg.fields?.routingKey || undefined;
-
+                const payload = JSON.parse(delivery.content.toString());
+                const messageId = delivery.properties.messageId
+                    ?? String(delivery.properties.headers?.['x-message-id'] ?? '');
+                const type = delivery.properties.type
+                    ?? String(delivery.properties.headers?.['x-event-type'] ?? '');
                 await onMessage({
                     messageId,
                     type,
                     payload,
                     status: EventConsumeStatus.RECEIVED,
-                    properties: msg.properties,
-                    routingKey,
+                    properties: delivery.properties,
+                    routingKey: delivery.routingKey || undefined
                 });
-
-                const channelWritable = this.isChannelWritable();
-                if (channelWritable) {
-                    this._pendingAcks++;
-                    try { channel.ack(msg); } finally { this._pendingAcks--; }
-                } else {
-                    log('warn', '[AMQP] Cannot ack: channel not writable');
-                }
+                return 'ack';
             } catch {
-                const channelWritable = this.isChannelWritable();
-                if (channelWritable) {
-                    this._pendingAcks++;
-                    try {
-                        channel.nack(msg, false, false);
-                    } catch (nackErr) {
-                        log('error', '[AMQP] Failed to nack message', nackErr);
-                    } finally {
-                        this._pendingAcks--;
-                    }
-                } else {
-                    log('warn', '[AMQP] Cannot nack: channel not writable');
-                }
+                return 'reject';
+            }
+        });
+    }
+
+    /** Consumes raw messages and applies an explicit disposition. */
+    async consumeRaw(
+        queue: string,
+        onMessage: (delivery: RawMessageDelivery) => Promise<DeliveryDisposition>
+    ): Promise<void> {
+        const channel = this.channel;
+        const {consumerTag} = await channel.consume(queue, async (message) => {
+            if (!message) return;
+
+            this._processingMessages++;
+            let disposition: DeliveryDisposition = 'requeue';
+            try {
+                disposition = await onMessage({
+                    content: message.content,
+                    properties: message.properties,
+                    exchange: message.fields.exchange,
+                    routingKey: message.fields.routingKey,
+                    redelivered: message.fields.redelivered
+                });
+            } catch (error) {
+                log('error', '[AMQP] Raw delivery handler failed', error);
             } finally {
                 this._processingMessages--;
+            }
+
+            this._pendingAcks++;
+            try {
+                if (disposition === 'ack') channel.ack(message);
+                else channel.nack(message, false, disposition === 'requeue');
+            } catch (error) {
+                log('warn', '[AMQP] Delivery disposition could not be written', error);
+            } finally {
+                this._pendingAcks--;
             }
         });
 
         this.consumerTags.set(queue, consumerTag);
     }
 
-    /**
-     * Cancels all active consumer subscriptions.
-     */
+    /** Registers a transport failure listener. */
+    onDisconnect(listener: (disconnect: MessageQueueDisconnect) => void): () => void {
+        this.disconnectListeners.add(listener);
+        return () => this.disconnectListeners.delete(listener);
+    }
+
+    /** Cancels every active consumer before shutdown or recovery. */
     async cancelAllConsumers(): Promise<void> {
-        for (const tag of this.consumerTags.values()) {
-            try { await this._channel.cancel(tag); } catch (err) {
-                log('warn', `[AMQP] Failed to cancel consumer tag ${tag}`, err);
-            }
-        }
+        const channel = this._channel;
+        if (!channel) return;
+
+        const tags = Array.from(this.consumerTags.values());
         this.consumerTags.clear();
+        await Promise.all(tags.map(async (tag) => {
+            try {
+                await channel.cancel(tag);
+            } catch (error) {
+                log('warn', `[AMQP] Failed to cancel consumer ${tag}`, error);
+            }
+        }));
     }
 
-    /**
-     * Resolves when all in-flight messages and pending acks/nacks are complete.
-     */
-    async waitForProcessing(): Promise<void> {
+    /** Waits for in-flight delivery handlers up to a bounded timeout. */
+    async waitForProcessing(timeoutMs = 10000): Promise<boolean> {
+        const deadline = Date.now() + timeoutMs;
         while (this._processingMessages > 0 || this._pendingAcks > 0) {
-            await new Promise(resolve => setTimeout(resolve, 50));
+            if (Date.now() >= deadline) return false;
+            await new Promise(resolve => setTimeout(resolve, 25));
         }
+        return true;
     }
 
-    /**
-     * Gracefully closes the channel and connection.
-     * Waits up to 10 seconds for in-flight messages to finish before forcing close.
-     */
-    async disconnect(): Promise<void> {
-        if (this.closed) return;
-        const channel = this._channel;
-        const connection = this._connection;
-
+    /** Cancels consumers, drains bounded work and closes all AMQP resources. */
+    async disconnect(timeoutMs = 10000): Promise<void> {
+        this.closing = true;
         await this.cancelAllConsumers();
-        await this.waitForProcessing();
-
-        try { if (channel) await channel.close(); } catch (err) {
-            log('warn', '[AMQP] Error closing channel', err);
-        }
-        try { if (connection) await connection.close(); } catch (err) {
-            log('warn', '[AMQP] Error closing connection', err);
-        }
-
+        await this.waitForProcessing(timeoutMs);
+        await this.closeResources(false, timeoutMs);
         this.closed = true;
+        this.closing = false;
     }
 
-    /** Alias for `disconnect()`. */
-    async close(): Promise<void> {
-        await this.disconnect();
-    }
+    /** Alias for disconnect. */
+    async close(): Promise<void> { await this.disconnect(); }
 
-    /**
-     * Forces an immediate close of the connection without waiting for in-flight messages.
-     * Use when a clean shutdown is not possible (e.g., connection already broken).
-     */
+    /** Immediately closes AMQP resources so RabbitMQ can redeliver unacked work. */
     async forceClose(): Promise<void> {
+        this.closing = true;
         this.closed = true;
+        const reason = new Error('[AMQP] Transport force-closed before publication completed');
+        for (const reject of this.pendingPublications.values()) reject(reason);
+        this.pendingPublications.clear();
+        await this.closeResources(true);
+        this.closing = false;
+    }
+
+    private async assertExchange(exchange: NonNullable<PublishOptions['exchange']>): Promise<void> {
+        const key = `${exchange.name}:${exchange.type}:${JSON.stringify(exchange.options ?? {})}`;
+        let assertion = this.exchangeAssertions.get(key);
+        if (!assertion) {
+            assertion = this.channel.assertExchange(exchange.name, exchange.type, exchange.options).then(() => undefined);
+            this.exchangeAssertions.set(key, assertion);
+        }
+
+        try {
+            await assertion;
+        } catch (error) {
+            this.exchangeAssertions.delete(key);
+            throw error;
+        }
+    }
+
+    private handleReturnedMessage(message: ConsumeMessage): void {
+        const publicationId = message.properties.headers?.['x-resilientmq-publication-id'];
+        if (typeof publicationId !== 'string') return;
+        this.pendingPublications.get(publicationId)?.(
+            new Error(`[AMQP] Message ${message.properties.messageId ?? publicationId} was returned as unroutable`)
+        );
+    }
+
+    private async waitForDrain(channel: ConfirmChannel, timeoutMs: number): Promise<void> {
+        await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            const timeout = setTimeout(
+                () => finish(new Error(`[AMQP] Channel drain timed out after ${timeoutMs}ms`)),
+                timeoutMs
+            );
+            const onDrain = () => finish();
+            const onClose = () => finish(new Error('[AMQP] Channel closed while waiting for drain'));
+            const finish = (error?: Error) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                channel.removeListener('drain', onDrain);
+                channel.removeListener('close', onClose);
+                if (error) reject(error); else resolve();
+            };
+            channel.once('drain', onDrain);
+            channel.once('close', onClose);
+        });
+    }
+
+    private handleDisconnect(source: MessageQueueDisconnect['source'], error?: Error): void {
+        if (this.closed && !error) return;
+        this.closed = true;
+        const reason = error ?? new Error(`[AMQP] ${source} closed before publication completed`);
+        for (const reject of this.pendingPublications.values()) reject(reason);
+        this.pendingPublications.clear();
+        if (!this.closing) {
+            for (const listener of this.disconnectListeners) listener({source, error});
+        }
+        log(error ? 'error' : 'debug', `[AMQP] ${source} unavailable`, error);
+    }
+
+    private async closeResources(force = false, timeoutMs = 10000): Promise<void> {
         const channel = this._channel;
         const connection = this._connection;
-        try { if (channel) await channel.close(); } catch {}
-        try { if (connection) await connection.close(); } catch {}
+        this._channel = undefined;
+        this._connection = undefined;
+        this.exchangeAssertions.clear();
+        this.drainGate = undefined;
+
+        if (force && this.destroyConnection(connection)) return;
+
+        const gracefulClose = (async () => {
+            try {
+                if (channel) await channel.close();
+            } catch (error) {
+                log('warn', '[AMQP] Confirm channel close failed', error);
+            }
+            try {
+                if (connection) await connection.close();
+            } catch (error) {
+                log('warn', '[AMQP] Connection close failed', error);
+            }
+        })();
+
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const timedOut = await Promise.race([
+            gracefulClose.then(() => false),
+            new Promise<boolean>(resolve => {
+                timeout = setTimeout(() => resolve(true), Math.max(0, timeoutMs));
+            })
+        ]);
+        if (timeout) clearTimeout(timeout);
+        if (timedOut) this.destroyConnection(connection);
     }
 
-    /* istanbul ignore next */
-    private isChannelWritable(): boolean {
-        return !!(this._channel as any)?.connection?.stream?.writable;
+    private destroyConnection(connection: ChannelModel | undefined): boolean {
+        const stream = (connection?.connection as {stream?: {destroy(error?: Error): void}} | undefined)?.stream;
+        if (!stream) return false;
+        stream.destroy();
+        return true;
+    }
+
+    private withDefaultHeartbeat(config: string | Options.Connect): string | Options.Connect {
+        if (typeof config !== 'string') {
+            return {...config, heartbeat: config.heartbeat ?? 10};
+        }
+
+        try {
+            const url = new URL(config);
+            if (!url.searchParams.has('heartbeat')) url.searchParams.set('heartbeat', '10');
+            return url.toString();
+        } catch {
+            return config;
+        }
     }
 }

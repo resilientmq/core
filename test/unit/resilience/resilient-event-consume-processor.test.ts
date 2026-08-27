@@ -1,1098 +1,285 @@
-import { IgnoredEventError } from '../../../src/resilience';
-import { ResilientEventConsumeProcessor } from '../../../src/resilience/resilient-event-consume-processor';
-import { EventStoreMock } from '../../utils/event-store-mock';
-import { EventMessage, MessageQueue, Middleware, RabbitMQResilientProcessorConfig } from '../../../src/types';
-import { EventConsumeStatus } from '../../../src/types';
+import {ResilientEventConsumeProcessor} from '../../../src/resilience/resilient-event-consume-processor';
+import {IgnoredEventError} from '../../../src/resilience/ignored-event-error';
+import {
+    EventConsumeStatus,
+    MessageQueue,
+    MessageQueueDisconnect,
+    RabbitMQResilientProcessorConfig,
+    RawMessageDelivery
+} from '../../../src/types';
+import {EventStoreMock} from '../../utils/event-store-mock';
 
 describe('ResilientEventConsumeProcessor', () => {
-    let processor: ResilientEventConsumeProcessor;
-    let mockStore: EventStoreMock;
-    let mockBroker: jest.Mocked<MessageQueue>;
-    let testEvent: EventMessage;
-    let config: RabbitMQResilientProcessorConfig;
+    let broker: jest.Mocked<MessageQueue>;
+    let store: EventStoreMock;
 
     beforeEach(() => {
-        mockStore = new EventStoreMock();
-
-        mockBroker = {
+        broker = {
             connect: jest.fn(),
             publish: jest.fn(),
+            publishRaw: jest.fn(),
             consume: jest.fn(),
-            disconnect: jest.fn(),
-            close: jest.fn()
-        } as any;
-
-        testEvent = {
-            messageId: 'msg-001',
-            type: 'test.event',
-            payload: { data: 'test' },
-            status: EventConsumeStatus.RECEIVED,
-            properties: {}
+            consumeRaw: jest.fn(),
+            onDisconnect: jest.fn((_listener: (disconnect: MessageQueueDisconnect) => void) => () => undefined)
         };
-
-        config = {
-            connection: 'amqp://localhost:5672',
-            broker: mockBroker,
-            store: mockStore,
-            consumeQueue: { queue: 'test.queue' },
-            eventsToProcess: [
-                {
-                    type: 'test.event',
-                    handler: jest.fn()
-                }
-            ]
-        };
+        store = new EventStoreMock();
     });
 
-    afterEach(() => {
-        mockStore.clear();
-        jest.clearAllMocks();
+    it('completes a claimed delivery and exposes stable and ephemeral identities', async () => {
+        const handler = jest.fn();
+        const processor = createProcessor({broker, store, handler});
+        const result = await processor.processRaw(delivery({messageId: 'one'}));
+        expect(result).toBe('ack');
+        expect(handler).toHaveBeenCalledWith(
+            expect.objectContaining({messageId: 'one'}),
+            expect.objectContaining({
+                attempt: 1,
+                serviceId: expect.any(String),
+                instanceId: 'instance-a',
+                deliveryId: expect.any(String),
+                fencingToken: expect.any(String)
+            })
+        );
+        expect((await store.getEvent({messageId: 'one', payload: null}))?.status).toBe(EventConsumeStatus.DONE);
     });
 
-    describe('process', () => {
+    it('reclaims a persisted PROCESSING state instead of treating it as completed', async () => {
+        await store.saveEvent({messageId: 'stale', type: 'known', payload: {}, status: EventConsumeStatus.PROCESSING});
+        const handler = jest.fn();
+        const processor = createProcessor({broker, store, handler});
+        await expect(processor.processRaw(delivery({messageId: 'stale'}))).resolves.toBe('ack');
+        expect(handler).toHaveBeenCalledTimes(1);
+    });
 
-                it('should mark event as DONE and not retry if IgnoredEventError is thrown', async () => {
-                    const handler = jest.fn().mockImplementation(() => {
-                        throw new IgnoredEventError('Evento ignorado por test');
-                    });
-                    config.eventsToProcess = [{ type: 'test.event', handler }];
-                    processor = new ResilientEventConsumeProcessor(config);
+    it('does not execute a terminal duplicate', async () => {
+        await store.saveEvent({messageId: 'done', type: 'known', payload: {}, status: EventConsumeStatus.DONE});
+        const handler = jest.fn();
+        const processor = createProcessor({broker, store, handler});
+        await expect(processor.processRaw(delivery({messageId: 'done'}))).resolves.toBe('ack');
+        expect(handler).not.toHaveBeenCalled();
+    });
 
-                    await processor.process(testEvent);
+    it('delays a concurrent delivery while another replica owns its lease', async () => {
+        let releaseHandler!: () => void;
+        const handler = jest.fn(() => new Promise<void>(resolve => { releaseHandler = resolve; }));
+        const first = createProcessor({broker, store, handler, instanceId: 'first'});
+        const second = createProcessor({broker, store, handler: jest.fn(), instanceId: 'second'});
+        const active = first.processRaw(delivery({messageId: 'leased'}));
+        await new Promise(resolve => setImmediate(resolve));
+        await expect(second.processRaw(delivery({messageId: 'leased'}))).resolves.toBe('requeue');
+        releaseHandler();
+        await expect(active).resolves.toBe('ack');
+    });
 
-                    // El handler debe ser llamado
-                    expect(handler).toHaveBeenCalledWith(testEvent);
-                    // El evento debe marcarse como DONE
-                    const savedEvent = await mockStore.getEvent(testEvent);
-                    expect(savedEvent?.status).toBe(EventConsumeStatus.DONE);
-                    // No debe publicarse en retry ni DLQ
-                    expect(mockBroker.publish).not.toHaveBeenCalled();
-                });
-        it('should process event with matching handler', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
+    it('does not consume a RabbitMQ retry attempt while the inbox store is unavailable', async () => {
+        jest.spyOn(store, 'claimConsumeEvent').mockRejectedValueOnce(new Error('store unavailable'));
+        const processor = createProcessor({broker, store, handler: jest.fn()});
+        await expect(processor.processRaw(delivery({messageId: 'store-down'}))).rejects.toThrow('store unavailable');
+        expect(broker.publishRaw).not.toHaveBeenCalled();
+    });
 
-            await processor.process(testEvent);
+    it('uses RabbitMQ x-death from the main queue as the delivery attempt', () => {
+        const processor = createProcessor({broker, store, handler: jest.fn()});
+        expect(processor.getDeliveryAttempt(delivery({
+            headers: {'x-death': [{queue: 'main', reason: 'rejected', count: 7}]}
+        }))).toBe(8);
+    });
 
-            expect(handler).toHaveBeenCalledWith(testEvent);
+    it('uses quorum delivery counters without application-owned retry headers', () => {
+        const processor = createProcessor({broker, store, handler: jest.fn()});
+        expect(processor.getDeliveryAttempt(delivery({headers: {'x-delivery-count': 4}}))).toBe(5);
+        expect(processor.getDeliveryAttempt(delivery({headers: {'x-acquired-count': 6}}))).toBe(7);
+    });
+
+    it('does not count a connection redelivery as a business retry', () => {
+        const processor = createProcessor({broker, store, handler: jest.fn()});
+        expect(processor.getDeliveryAttempt(delivery({redelivered: true}))).toBe(1);
+    });
+
+    it('rejects a failed non-final attempt so RabbitMQ owns retry routing', async () => {
+        const processor = createProcessor({broker, store, handler: jest.fn().mockRejectedValue(new Error('boom'))});
+        await expect(processor.processRaw(delivery({messageId: 'retry'}))).resolves.toBe('reject');
+        expect(broker.publish).not.toHaveBeenCalled();
+        expect(broker.publishRaw).not.toHaveBeenCalled();
+        expect((await store.getEvent({messageId: 'retry', payload: null}))?.status).toBe(EventConsumeStatus.RETRY);
+    });
+
+    it('completes an explicitly ignored business event without retrying it', async () => {
+        const processor = createProcessor({
+            broker,
+            store,
+            handler: jest.fn().mockRejectedValue(new IgnoredEventError('not applicable'))
         });
+        await expect(processor.processRaw(delivery({messageId: 'ignored'}))).resolves.toBe('ack');
+        expect((await store.getEvent({messageId: 'ignored', payload: null}))?.status).toBe(EventConsumeStatus.DONE);
+    });
 
-        it('should save event to store before processing', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
+    it('requeues when a fenced completion loses ownership', async () => {
+        jest.spyOn(store, 'transitionConsumeEvent').mockResolvedValueOnce(false);
+        const onSuccess = jest.fn();
+        const processor = createProcessor({broker, store, handler: jest.fn(), events: {onSuccess}});
+        await expect(processor.processRaw(delivery({messageId: 'lost-fence'}))).resolves.toBe('requeue');
+        expect(onSuccess).not.toHaveBeenCalled();
+    });
 
-            await processor.process(testEvent);
-
-            expect(mockStore.getCallCount('saveEvent')).toBe(1);
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent).toBeDefined();
+    it('does not let a success hook failure change a durable completion', async () => {
+        const processor = createProcessor({
+            broker,
+            store,
+            handler: jest.fn(),
+            events: {onSuccess: () => { throw new Error('observer failed'); }}
         });
+        await expect(processor.processRaw(delivery({messageId: 'hook'}))).resolves.toBe('ack');
+        expect((await store.getEvent({messageId: 'hook', payload: null}))?.status).toBe(EventConsumeStatus.DONE);
+    });
 
-        it('should update event status to PROCESSING before handler execution', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(mockStore.getCallCount('updateEventStatus')).toBeGreaterThanOrEqual(1);
-        });
-
-        it('should update event status to DONE after successful processing', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent?.status).toBe(EventConsumeStatus.DONE);
-        });
-
-        it('should skip duplicate events on first attempt', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Process event first time
-            await processor.process(testEvent);
-
-            // Try to process same event again (attempt 0)
-            testEvent.properties = { headers: {} };
-            await processor.process(testEvent);
-
-            // Handler should only be called once
-            expect(handler).toHaveBeenCalledTimes(1);
-        });
-
-        it('should process duplicate events on retry attempts using x-retry-count', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Process event first time
-            await processor.process(testEvent);
-
-            // Simulate retry with x-retry-count header (our managed counter)
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': 1
-                }
-            };
-
-            await processor.process(testEvent);
-
-            // Handler should be called twice
-            expect(handler).toHaveBeenCalledTimes(2);
-        });
-
-        it('should fall back to x-death headers from current consume queue when x-retry-count is absent', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Process event first time
-            await processor.process(testEvent);
-
-            // Simulate retry with x-death header (legacy/in-flight messages)
-            testEvent.properties = {
-                headers: {
-                    'x-death': [{ queue: 'test.queue', count: 1 }]
-                }
-            };
-
-            await processor.process(testEvent);
-
-            // Handler should be called twice
-            expect(handler).toHaveBeenCalledTimes(2);
-        });
-
-        it('should ignore x-death counts from other queues when x-retry-count is absent', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            testEvent.properties = {
-                headers: {
-                    'x-death': [{ queue: 'other.queue', count: 50 }]
-                }
-            };
-
-            await processor.process(testEvent);
-
-            // Since x-death entry is from another queue, retry count must be treated as 0
-            // and duplicate processing should be skipped.
-            expect(handler).toHaveBeenCalledTimes(1);
-        });
-
-        it('should execute middleware before handler', async () => {
-            const executionOrder: string[] = [];
-
-            const middleware: Middleware = async (ctx, next) => {
-                executionOrder.push('middleware');
-                await next();
-            };
-
-            const handler = jest.fn(async () => {
-                executionOrder.push('handler');
-            });
-
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.middleware = [middleware];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(executionOrder).toEqual(['middleware', 'handler']);
-        });
-
-        it('should route to DLQ when handler fails and current attempt is the last one allowed', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error on last allowed attempt'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.deadLetterQueue = { queue: 'dlq.queue' };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Setting retry to 2, and process() will increment attempt to 2+1 = 3, hit maxAttempts, and send to DLQ.
-            testEvent.properties = {
-                headers: { 'x-retry-count': 2 }
-            };
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'dlq.queue',
-                expect.any(Object),
-                undefined
-            );
-        });
-
-        it('should publish to retry queue on error (not throw)', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Should NOT throw — processor publishes to retry queue and ACKs
-            await processor.process(testEvent);
-
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent?.status).toBe(EventConsumeStatus.RETRY);
-
-            // Verify retry queue publish with incremented x-retry-count
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'retry.queue',
-                expect.objectContaining({
-                    messageId: testEvent.messageId,
-                    properties: expect.objectContaining({
-                        headers: expect.objectContaining({
-                            'x-retry-count': 1
-                        })
-                    })
-                }),
-                undefined
-            );
-        });
-
-        it('should send to DLQ after max attempts exceeded via x-retry-count', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: {
-                    name: 'dlq.exchange',
-                    type: 'direct',
-                    options: { durable: true }
-                }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Pre-save event (simulates that it was stored during earlier processing attempts)
-            await mockStore.saveEvent(testEvent);
-
-            // Simulate 3rd retry (x-retry-count = 3, exceeds maxAttempts of 3)
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': 3
-                }
-            };
-
-            // Should NOT throw — message is sent to DLQ and ACK'd
-            await processor.process(testEvent);
-
-            // Store should be updated to ERROR status
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
-
-            // Verify message was published to DLQ
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'test.dlq',
-                expect.objectContaining({
-                    messageId: testEvent.messageId,
-                    type: testEvent.type
-                }),
-                expect.objectContaining({
-                    exchange: expect.objectContaining({
-                        name: 'dlq.exchange'
-                    })
+    it('publishes the final failure to DLQ before acknowledging the original', async () => {
+        const processor = createProcessor({broker, store, handler: jest.fn().mockRejectedValue(new Error('boom'))});
+        const result = await processor.processRaw(delivery({
+            messageId: 'dead',
+            headers: {'x-death': [{queue: 'main', reason: 'rejected', count: 2}]}
+        }));
+        expect(result).toBe('ack');
+        expect(broker.publishRaw).toHaveBeenCalledWith(
+            'dead',
+            expect.any(Buffer),
+            expect.objectContaining({
+                headers: expect.objectContaining({
+                    'x-resilientmq-attempt': 3,
+                    'x-resilientmq-original-queue': 'main'
                 })
-            );
+            }),
+            expect.anything()
+        );
+        expect((await store.getEvent({messageId: 'dead', payload: null}))?.status).toBe(EventConsumeStatus.ERROR);
+    });
+
+    it('never acknowledges when the final DLQ publication is not confirmed', async () => {
+        broker.publishRaw.mockRejectedValue(new Error('confirm unavailable'));
+        const processor = createProcessor({broker, store, handler: jest.fn().mockRejectedValue(new Error('boom'))});
+        const result = await processor.processRaw(delivery({
+            messageId: 'safe',
+            headers: {'x-death': [{queue: 'main', reason: 'rejected', count: 2}]}
+        }));
+        expect(result).toBe('reject');
+        expect((await store.getEvent({messageId: 'safe', payload: null}))?.status).toBe(EventConsumeStatus.PROCESSING);
+    });
+
+    it('requeues after confirmed DLQ publication when the terminal fence cannot be persisted', async () => {
+        jest.spyOn(store, 'transitionConsumeEvent').mockResolvedValueOnce(false);
+        const processor = createProcessor({broker, store, handler: jest.fn().mockRejectedValue(new Error('boom'))});
+        const result = await processor.processRaw(delivery({
+            messageId: 'terminal-fence',
+            headers: {'x-death': [{queue: 'main', reason: 'rejected', count: 2}]}
+        }));
+        expect(result).toBe('requeue');
+        expect(broker.publishRaw).toHaveBeenCalledTimes(1);
+        expect((await store.getEvent({messageId: 'terminal-fence', payload: null}))?.status)
+            .toBe(EventConsumeStatus.PROCESSING);
+    });
+
+    it('bounds malformed JSON with the same RabbitMQ attempt headers', async () => {
+        const processor = createProcessor({broker, store, handler: jest.fn()});
+        const malformed = delivery({
+            messageId: 'poison',
+            content: Buffer.from('{broken'),
+            headers: {'x-death': [{queue: 'main', reason: 'rejected', count: 2}]}
         });
+        await expect(processor.processRaw(malformed)).resolves.toBe('ack');
+        expect(broker.publishRaw).toHaveBeenCalledWith('dead', malformed.content, expect.anything(), expect.anything());
+        expect((await store.getEvent({messageId: 'poison', payload: null}))?.status).toBe(EventConsumeStatus.ERROR);
+    });
 
-        it('should hard guard at entry when x-retry-count >= maxAttempts', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: {
-                    name: 'dlq.exchange',
-                    type: 'direct',
-                    options: { durable: true }
-                }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
+    it('rejects malformed JSON before its final attempt', async () => {
+        const processor = createProcessor({broker, store, handler: jest.fn()});
+        await expect(processor.processRaw(delivery({content: Buffer.from('{broken')}))).resolves.toBe('reject');
+        expect(broker.publishRaw).not.toHaveBeenCalled();
+    });
 
-            // Simulate already exceeding max (e.g., race condition set it to 100)
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': 100
-                }
-            };
+    it('acknowledges ignored unknown events without touching the store', async () => {
+        const processor = createProcessor({broker, store, handler: jest.fn(), ignoreUnknownEvents: true});
+        await expect(processor.processRaw(delivery({type: 'unknown'}))).resolves.toBe('ack');
+        expect(store.getCallCount('claimConsumeEvent')).toBe(0);
+    });
 
-            // Should NOT throw, should NOT call handler
-            await processor.process(testEvent);
+    it('marks accepted unknown events as completed when ignoring is disabled', async () => {
+        const processor = createProcessor({broker, store, handler: jest.fn(), ignoreUnknownEvents: false});
+        await expect(processor.processRaw(delivery({messageId: 'unknown', type: 'other'}))).resolves.toBe('ack');
+        expect((await store.getEvent({messageId: 'unknown', payload: null}))?.status).toBe(EventConsumeStatus.DONE);
+    });
 
-            // Handler must NOT have been called
-            expect(handler).not.toHaveBeenCalled();
-
-            // Message should be routed to DLQ
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'test.dlq',
-                expect.objectContaining({
-                    messageId: testEvent.messageId
-                }),
-                expect.objectContaining({
-                    exchange: expect.objectContaining({
-                        name: 'dlq.exchange'
-                    })
-                })
-            );
+    it('cooperatively aborts and retries timed-out handlers without releasing their lease', async () => {
+        const handler = jest.fn((_event: unknown, context: {signal: AbortSignal}) => new Promise<void>(resolve => {
+            context.signal.addEventListener('abort', () => resolve());
+        }));
+        const processor = createProcessor({
+            broker,
+            store,
+            handler,
+            processingTimeoutMs: 5,
+            processingLeaseMs: 50
         });
-
-        it('should update status to ERROR after sending to DLQ', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: {
-                    name: 'dlq.exchange',
-                    type: 'direct',
-                    options: { durable: true }
-                }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Pre-save event (simulates that it was stored during earlier processing attempts)
-            await mockStore.saveEvent(testEvent);
-
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': 3
-                }
-            };
-
-            // Should NOT throw — message is sent to DLQ and ACK'd
-            await processor.process(testEvent);
-
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
-        });
-
-        it('should call onEventStart hook before processing', async () => {
-            const onEventStart = jest.fn();
-            const handler = jest.fn();
-
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.events = { onEventStart };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(onEventStart).toHaveBeenCalledWith(testEvent, expect.any(Object));
-        });
-
-        it('should skip event when onEventStart sets skipEvent flag', async () => {
-            const onEventStart = jest.fn((event, control) => {
-                control.skipEvent = true;
-            });
-            const handler = jest.fn();
-
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.events = { onEventStart };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(handler).not.toHaveBeenCalled();
-        });
-
-        it('should call onSuccess hook after successful processing', async () => {
-            const onSuccess = jest.fn();
-            const handler = jest.fn();
-
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.events = { onSuccess };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(onSuccess).toHaveBeenCalledWith(testEvent);
-        });
-
-        it('should call onError hook when processing fails', async () => {
-            const onError = jest.fn();
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.events = { onError };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Should NOT throw anymore — processor publishes to retry queue
-            await processor.process(testEvent);
-
-            expect(onError).toHaveBeenCalledWith(testEvent, expect.any(Error));
-        });
-
-        it('should handle unknown event types gracefully', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'other.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(handler).not.toHaveBeenCalled();
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent?.status).toBe(EventConsumeStatus.DONE);
-        });
-
-        it('should discard unknown events immediately when ignoreUnknownEvents is enabled', async () => {
-            const handler = jest.fn();
-            config.ignoreUnknownEvents = true;
-            config.eventsToProcess = [{ type: 'other.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await expect(processor.process(testEvent)).rejects.toThrow('Unknown event type: test.event');
-
-            expect(handler).not.toHaveBeenCalled();
-            expect(mockStore.getCallCount('saveEvent')).toBe(0);
-            expect(mockStore.getCallCount('updateEventStatus')).toBe(0);
-            expect(mockBroker.publish).not.toHaveBeenCalled();
-        });
-
-
-
-        it('should work without store configured', async () => {
-            const handler = jest.fn();
-            config.store = undefined;
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(handler).toHaveBeenCalled();
-        });
-
-        it('should prefer x-retry-count over x-death headers', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 5 };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Both headers present — x-retry-count should take precedence
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': 2,
-                    'x-death': [{ count: 50 }] // This would cause issues if used
-                }
-            };
-
-            await processor.process(testEvent);
-
-            // Should process normally because x-retry-count (2) < maxAttempts (5)
-            expect(handler).toHaveBeenCalled();
-        });
-
-        it('should use default maxAttempts of 3 when not configured', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue' };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: {
-                    name: 'dlq.exchange',
-                    type: 'direct',
-                    options: { durable: true }
-                }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Pre-save event (simulates that it was stored during earlier processing attempts)
-            await mockStore.saveEvent(testEvent);
-
-            // Simulate exceeding default max of 3
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': 3
-                }
-            };
-
-            // Should NOT throw — message is sent to DLQ and ACK'd
-            await processor.process(testEvent);
-
-            // Verify status was updated to ERROR
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
-
-            // Verify message was published to DLQ
-            expect(mockBroker.publish).toHaveBeenCalled();
-        });
-
-        it('should increment x-retry-count on each retry', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 5 };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // First failure (retryCount = 0)
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'retry.queue',
-                expect.objectContaining({
-                    properties: expect.objectContaining({
-                        headers: expect.objectContaining({
-                            'x-retry-count': 1
-                        })
-                    })
-                }),
-                undefined
-            );
-
-            // Simulate second failure (retryCount = 1)
-            mockBroker.publish.mockClear();
-            testEvent.properties = {
-                headers: { 'x-retry-count': 1 }
-            };
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'retry.queue',
-                expect.objectContaining({
-                    properties: expect.objectContaining({
-                        headers: expect.objectContaining({
-                            'x-retry-count': 2
-                        })
-                    })
-                }),
-                undefined
-            );
-        });
-
-        it('should discard message when max retries exceeded and no DLQ configured', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            // No deadLetterQueue configured
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Pre-save event (simulates that it was stored during earlier processing attempts)
-            await mockStore.saveEvent(testEvent);
-
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': 3
-                }
-            };
-
-            // Should NOT throw — message is discarded (ACK'd)
-            await processor.process(testEvent);
-
-            // Handler must NOT have been called (hard guard)
-            expect(handler).not.toHaveBeenCalled();
-
-            // No DLQ publish should happen
-            expect(mockBroker.publish).not.toHaveBeenCalled();
-
-            // Store should be updated to ERROR
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
-        });
-
-        it('should treat NaN x-retry-count as 0 (first attempt)', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': NaN
-                }
-            };
-
-            await processor.process(testEvent);
-
-            // NaN is treated as 0 (first attempt), so handler should be called
-            expect(handler).toHaveBeenCalledWith(testEvent);
-        });
-
-        it('should treat negative x-retry-count as 0 (first attempt)', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': -5
-                }
-            };
-
-            await processor.process(testEvent);
-
-            expect(handler).toHaveBeenCalledWith(testEvent);
-        });
-
-        it('should accept string x-retry-count and coerce to number', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await mockStore.saveEvent(testEvent);
-
-            testEvent.properties = {
-                headers: {
-                    'x-retry-count': '5' as any // String coerced to 5
-                }
-            };
-
-            await processor.process(testEvent);
-
-            // 5 >= 3, so hard guard should fire, handler NOT called
-            expect(handler).not.toHaveBeenCalled();
-            expect(mockBroker.publish).toHaveBeenCalled();
-        });
-
-        it('should ACK (not throw) when retry queue publish fails (safety net)', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 5 };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Make broker.publish fail — this simulates the retry queue being down
-            mockBroker.publish.mockRejectedValue(new Error('AMQP connection lost'));
-
-            // Should NOT throw — safety net catches internal error and ACKs
-            await processor.process(testEvent);
-
-            // Handler was called and failed
-            expect(handler).toHaveBeenCalled();
-        });
-
-        it('should route to DLQ when no retry queue configured and handler fails', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            // No retryQueue configured
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            // Handler was called
-            expect(handler).toHaveBeenCalled();
-
-            // Message should be sent to DLQ since no retry queue exists
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'test.dlq',
-                expect.objectContaining({
-                    messageId: testEvent.messageId
-                }),
-                expect.objectContaining({
-                    exchange: expect.objectContaining({
-                        name: 'dlq.exchange'
-                    })
-                })
-            );
-        });
-
-        it('should discard when no retry queue and no DLQ configured and handler fails', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            // No retryQueue and no deadLetterQueue
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Should NOT throw
-            await processor.process(testEvent);
-
-            expect(handler).toHaveBeenCalled();
-            // No publish since neither retry nor DLQ configured
-            expect(mockBroker.publish).not.toHaveBeenCalled();
-        });
-
-        it('should treat NaN x-death count as 0 (fallback path)', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // x-death with NaN count — fallback should return 0
-            testEvent.properties = {
-                headers: {
-                    'x-death': [{ count: NaN }]
-                }
-            };
-
-            await processor.process(testEvent);
-            expect(handler).toHaveBeenCalledWith(testEvent);
-        });
-
-        it('should treat negative x-death count as 0 (fallback path)', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // x-death with negative count — fallback should return 0
-            testEvent.properties = {
-                headers: {
-                    'x-death': [{ count: -3 }]
-                }
-            };
-
-            await processor.process(testEvent);
-            expect(handler).toHaveBeenCalledWith(testEvent);
-        });
-
-        it('should treat x-death count of 0 as 0 (falsy branch in || 0)', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // x-death with count=0 — triggers the `|| 0` fallback branch
-            testEvent.properties = {
-                headers: {
-                    'x-death': [{ count: 0 }]
-                }
-            };
-
-            await processor.process(testEvent);
-            expect(handler).toHaveBeenCalledWith(testEvent);
-        });
-
-        it('should treat x-death with missing count as 0 (undefined || 0)', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // x-death with no count property — triggers the `|| 0` fallback
-            testEvent.properties = {
-                headers: {
-                    'x-death': [{}]
-                }
-            };
-
-            await processor.process(testEvent);
-            expect(handler).toHaveBeenCalledWith(testEvent);
-        });
-
-        it('should use err.reason as x-death-reason when present in DLQ event', async () => {
-            const handler = jest.fn().mockRejectedValue(Object.assign(new Error('Custom reason error'), { reason: 'custom-reason' }));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 1 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalled();
-            const publishedEvent = mockBroker.publish.mock.calls[0][1];
-            expect(publishedEvent.properties?.headers?.['x-death-reason']).toBe('custom-reason');
-        });
-
-        it('should preserve existing x-first-death-reason header in DLQ event', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 1 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            testEvent.properties = {
-                headers: {
-                    'x-first-death-reason': 'original-reason',
-                    'x-first-death-queue': 'original-queue'
-                }
-            };
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalled();
-            const publishedEvent = mockBroker.publish.mock.calls[0][1];
-            expect(publishedEvent.properties?.headers?.['x-first-death-reason']).toBe('original-reason');
-            expect(publishedEvent.properties?.headers?.['x-first-death-queue']).toBe('original-queue');
-        });
-
-        it('should use retry exchange routing key when publishing to retry queue', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = {
-                queue: 'retry.queue',
-                maxAttempts: 5,
-                exchange: {
-                    name: 'retry.exchange',
-                    type: 'direct',
-                    routingKey: 'retry.key',
-                    options: { durable: true }
-                }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'retry.queue',
-                expect.objectContaining({
-                    routingKey: 'retry.key'
-                }),
-                expect.objectContaining({
-                    exchange: expect.objectContaining({ name: 'retry.exchange' })
-                })
-            );
-        });
-
-        it('should fall back to event.routingKey when retry exchange has no routingKey', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = {
-                queue: 'retry.queue',
-                maxAttempts: 5,
-                exchange: {
-                    name: 'retry.exchange',
-                    type: 'direct',
-                    // no routingKey — triggers the ?? fallback to event.routingKey
-                    options: { durable: true }
-                }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            testEvent.routingKey = 'event.routing.key';
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'retry.queue',
-                expect.objectContaining({
-                    routingKey: 'event.routing.key'
-                }),
-                expect.objectContaining({
-                    exchange: expect.objectContaining({ name: 'retry.exchange' })
-                })
-            );
-        });
-
-        it('should ACK (not throw) when internal DLQ publish fails in safety wrapper', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 1 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Make DLQ publish fail — triggers the internal catch (line 183)
-            mockBroker.publish.mockRejectedValue(new Error('DLQ publish failed'));
-
-            // Should NOT throw — safety wrapper catches it
-            await expect(processor.process(testEvent)).resolves.not.toThrow();
-        });
-
-        it('should call onError when events.onError is defined but onSuccess is not', async () => {
-            const onError = jest.fn();
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            // events has onError but no onSuccess — covers the optional chaining branch
-            config.events = { onError };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(onError).toHaveBeenCalled();
-        });
-
-        it('should handle sendToDlqOrDiscard when events is defined but onError is undefined', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 1 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            // events exists but onError is undefined — covers the ?. branch
-            config.events = { onEventStart: jest.fn() };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalled();
-        });
-
-        it('should handle DLQ event when event.properties is undefined', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 1 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Remove properties entirely — covers the ?. branches in sendToDlqOrDiscard
-            const eventNoProps = { ...testEvent, properties: undefined as any };
-
-            await processor.process(eventNoProps);
-
-            expect(mockBroker.publish).toHaveBeenCalled();
-            const publishedEvent = mockBroker.publish.mock.calls[0][1];
-            // headers should still be set even when original properties was undefined
-            expect(publishedEvent.properties?.headers?.['x-error-message']).toBe('Handler error');
-        });
-
-        it('should fall back to event.routingKey in retry queue when no exchange configured', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = {
-                queue: 'retry.queue',
-                maxAttempts: 5,
-                // no exchange — triggers the fallback to event.routingKey
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            testEvent.routingKey = 'original.routing.key';
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'retry.queue',
-                expect.objectContaining({
-                    routingKey: 'original.routing.key'
-                }),
-                undefined
-            );
-        });
-
-        it('should handle DLQ event when event.properties exists but headers is undefined', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 1 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // properties exists but headers is undefined — covers ?. branches on lines 131, 139
-            const eventNoHeaders = { ...testEvent, properties: { persistent: true } as any };
-
-            await processor.process(eventNoHeaders);
-
-            expect(mockBroker.publish).toHaveBeenCalled();
-            const publishedEvent = mockBroker.publish.mock.calls[0][1];
-            expect(publishedEvent.properties?.headers?.['x-error-message']).toBe('Handler error');
-            // x-first-death-reason should be set to 'rejected' since no existing value
-            expect(publishedEvent.properties?.headers?.['x-first-death-reason']).toBe('rejected');
-        });
-
-        it('should handle DLQ event when err.stack is undefined', async () => {
-            const handler = jest.fn().mockRejectedValue(new Error('Handler error'));
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 1 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Override handler to throw error without stack — covers err.stack ?? '' branch (line 146)
-            const errNoStack = new Error('No stack error');
-            delete (errNoStack as any).stack;
-            (config.eventsToProcess[0].handler as jest.Mock).mockRejectedValue(errNoStack);
-
-            await processor.process(testEvent);
-
-            expect(mockBroker.publish).toHaveBeenCalled();
-            const publishedEvent = mockBroker.publish.mock.calls[0][1];
-            expect(publishedEvent.properties?.headers?.['x-error-stack']).toBe('');
-        });
-
-        it('should ACK (not throw) when hard guard DLQ publish fails — prevents infinite nack loop', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Simulate max retries exceeded
-            testEvent.properties = {
-                headers: { 'x-retry-count': 100 }
-            };
-
-            // Make DLQ publish fail — without the fix this would throw and cause a nack loop
-            mockBroker.publish.mockRejectedValue(new Error('DLQ publish failed'));
-
-            // MUST NOT throw — message will be ACKed to break the loop
-            await expect(processor.process(testEvent)).resolves.not.toThrow();
-
-            // Handler must NOT have been called (hard guard fires before handler)
-            expect(handler).not.toHaveBeenCalled();
-        });
-
-        it('should ACK (not throw) when hard guard store update fails — prevents infinite nack loop', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Simulate max retries exceeded
-            testEvent.properties = {
-                headers: { 'x-retry-count': 3 }
-            };
-
-            // Make store.updateEventStatus fail — sendToDlqOrDiscard calls this first
-            jest.spyOn(mockStore, 'updateEventStatus').mockRejectedValue(new Error('DB connection lost'));
-
-            // MUST NOT throw — hard guard catches the error and ACKs
-            await expect(processor.process(testEvent)).resolves.not.toThrow();
-            expect(handler).not.toHaveBeenCalled();
-        });
-
-        it('should still send to DLQ successfully from hard guard when publish works', async () => {
-            const handler = jest.fn();
-            config.eventsToProcess = [{ type: 'test.event', handler }];
-            config.retryQueue = { queue: 'retry.queue', maxAttempts: 3 };
-            config.deadLetterQueue = {
-                queue: 'test.dlq',
-                exchange: { name: 'dlq.exchange', type: 'direct', options: { durable: true } }
-            };
-            processor = new ResilientEventConsumeProcessor(config);
-
-            // Pre-save event (simulates that it was stored during earlier processing attempts)
-            await mockStore.saveEvent(testEvent);
-
-            testEvent.properties = {
-                headers: { 'x-retry-count': 5 }
-            };
-
-            // Normal case — DLQ publish succeeds (regression test for the try-catch addition)
-            await processor.process(testEvent);
-
-            expect(handler).not.toHaveBeenCalled();
-            expect(mockBroker.publish).toHaveBeenCalledWith(
-                'test.dlq',
-                expect.objectContaining({ messageId: testEvent.messageId }),
-                expect.objectContaining({
-                    exchange: expect.objectContaining({ name: 'dlq.exchange' })
-                })
-            );
-
-            const savedEvent = await mockStore.getEvent(testEvent);
-            expect(savedEvent?.status).toBe(EventConsumeStatus.ERROR);
-        });
+        await expect(processor.processRaw(delivery({messageId: 'timeout'}))).resolves.toBe('reject');
+        expect((await store.getEvent({messageId: 'timeout', payload: null}))?.status).toBe(EventConsumeStatus.PROCESSING);
+    });
+
+    it('requeues a shutdown abort without consuming a business attempt', async () => {
+        const handler = jest.fn((_event: unknown, context: {signal: AbortSignal}) => new Promise<void>(resolve => {
+            context.signal.addEventListener('abort', () => resolve());
+        }));
+        const processor = createProcessor({broker, store, handler});
+        const processing = processor.processRaw(delivery({messageId: 'shutdown'}));
+        await new Promise(resolve => setImmediate(resolve));
+        processor.abortActive();
+        await expect(processing).resolves.toBe('requeue');
     });
 });
+
+function createProcessor(overrides: {
+    broker: MessageQueue;
+    store?: EventStoreMock;
+    handler: jest.Mock;
+    instanceId?: string;
+    ignoreUnknownEvents?: boolean;
+    processingTimeoutMs?: number;
+    processingLeaseMs?: number;
+    events?: RabbitMQResilientProcessorConfig['events'];
+}): ResilientEventConsumeProcessor {
+    const config: RabbitMQResilientProcessorConfig = {
+        connection: 'amqp://localhost',
+        serviceId: 'orders-service',
+        resolvedServiceId: 'stable-service-hash',
+        instanceId: overrides.instanceId ?? 'instance-a',
+        consumeQueue: {queue: 'main'},
+        retryQueue: {queue: 'retry', ttlMs: 10, maxAttempts: 3},
+        deadLetterQueue: {queue: 'dead'},
+        eventsToProcess: [{type: 'known', handler: overrides.handler}],
+        broker: overrides.broker,
+        store: overrides.store,
+        ignoreUnknownEvents: overrides.ignoreUnknownEvents,
+        processingTimeoutMs: overrides.processingTimeoutMs,
+        processingLeaseMs: overrides.processingLeaseMs,
+        events: overrides.events
+    };
+    return new ResilientEventConsumeProcessor(config);
+}
+
+function delivery(overrides: {
+    messageId?: string;
+    type?: string;
+    content?: Buffer;
+    headers?: Record<string, unknown>;
+    redelivered?: boolean;
+} = {}): RawMessageDelivery {
+    return {
+        content: overrides.content ?? Buffer.from(JSON.stringify({value: 1})),
+        properties: {
+            messageId: overrides.messageId ?? 'message',
+            type: overrides.type ?? 'known',
+            headers: overrides.headers ?? {}
+        },
+        exchange: '',
+        routingKey: 'main',
+        redelivered: overrides.redelivered ?? false
+    };
+}

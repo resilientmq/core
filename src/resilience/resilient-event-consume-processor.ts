@@ -1,270 +1,440 @@
-import { applyMiddleware } from './middleware';
-import { IgnoredEventError } from './ignored-event-error';
-import { isLogLevelEnabled, log } from '../logger/logger';
-import { EventConsumeStatus, EventMessage, RabbitMQResilientProcessorConfig } from '../types';
+import {createHash, randomUUID} from 'crypto';
+import {applyMiddleware} from './middleware';
+import {IgnoredEventError} from './ignored-event-error';
+import {isLogLevelEnabled, log} from '../logger/logger';
+import {
+    ConsumeClaimResult,
+    DeliveryDisposition,
+    EventConsumeStatus,
+    EventMessage,
+    EventProcessConfig,
+    EventProcessingContext,
+    RabbitMQResilientProcessorConfig,
+    RawMessageDelivery
+} from '../types';
+import type {ResilienceMetricEvent} from '../metrics/metrics-collector';
 
-/**
- * Internal error used to short-circuit processing for unknown events when
- * `ignoreUnknownEvents` is enabled. The queue layer will ack the message
- * without requeueing so it is discarded immediately.
- */
-class UnknownEventDiscardError extends Error {
-    constructor(message: string) {
-        super(message);
-        this.name = 'UnknownEventDiscardError';
+/** Error raised when a handler exceeds its cooperative processing deadline. */
+class ProcessingTimeoutError extends Error {
+    constructor(timeoutMs: number) {
+        super(`Event processing exceeded ${timeoutMs}ms`);
+        this.name = 'ProcessingTimeoutError';
     }
 }
 
-/**
- * Handles the lifecycle of consuming events: deduplication, retries, and DLQ routing.
- *
- * Retry tracking uses a managed `x-retry-count` header instead of RabbitMQ's `x-death`
- * to avoid unreliable counting when multiple concurrent consumers race on the same retry queue.
- */
+/** Error raised when shutdown or connection replacement aborts a handler generation. */
+class ProcessingAbortedError extends Error {
+    constructor() {
+        super('Event processing was aborted by the runtime');
+        this.name = 'ProcessingAbortedError';
+    }
+}
+
+/** Processes raw RabbitMQ deliveries with broker-owned retry accounting and fenced inbox claims. */
 export class ResilientEventConsumeProcessor {
-    private readonly eventHandlerMap: Map<string, any>;
+    private readonly eventHandlerMap: Map<string, EventProcessConfig>;
+    private readonly activeControllers = new Set<AbortController>();
+    private readonly serviceId: string;
+    private readonly instanceId: string;
 
     constructor(private readonly config: RabbitMQResilientProcessorConfig) {
-        this.eventHandlerMap = new Map(config.eventsToProcess.map((e) => [e.type, e]));
+        this.eventHandlerMap = new Map(config.eventsToProcess.map(event => [event.type, event]));
+        this.serviceId = config.resolvedServiceId ?? this.hashService(config.serviceId ?? config.consumeQueue.queue);
+        this.instanceId = config.instanceId ?? randomUUID();
     }
 
-    /**
-     * Processes an event: applies middleware, deduplicates, invokes the handler,
-     * and manages retries or DLQ routing on failure.
-     * 
-     * Optimizations:
-     * - Fast-path for unknown events when ignoreUnknownEvents is enabled
-     * - Cached event type matching using Map for O(1) lookups
-     * - Lazy middleware initialization
-     */
-    async process(event: EventMessage): Promise<void> {
-        const { config } = this;
-        const { store, events, middleware, retryQueue, ignoreUnknownEvents } = config;
-        const retryCount = this.getRetryCount(event);
-        const maxAttempts = retryQueue?.maxAttempts ?? 3;
+    /** Parses and processes one raw delivery, including malformed-message retry limits. */
+    async processRaw(delivery: RawMessageDelivery): Promise<DeliveryDisposition> {
+        const messageId = this.resolveMessageId(delivery);
+        const attempt = this.getDeliveryAttempt(delivery);
+        this.emit({name: 'delivery.received', messageId, attempt});
 
-        // Hard guard: already at or past the limit — route to DLQ immediately
-        if (retryCount >= maxAttempts) {
-            log('warn', `[Processor] Message ${event.messageId} exceeded max retries (${retryCount}/${maxAttempts})`);
-            try {
-                await this.sendToDlqOrDiscard(event, retryCount, new Error(`Max retry attempts (${maxAttempts}) exceeded`));
-            } catch (dlqErr) {
-                log('error', `[Processor] CRITICAL: Hard guard failed to route ${event.messageId} to DLQ. ` +
-                    `Message will be ACKed to break nack loop. Error: ${(dlqErr as Error).message}`);
+        let payload: unknown;
+        try {
+            payload = JSON.parse(delivery.content.toString());
+        } catch (error) {
+            return this.handleMalformedDelivery(delivery, messageId, attempt, this.asError(error));
+        }
+
+        const type = this.headerString(delivery.properties.type)
+            ?? this.headerString(delivery.properties.headers?.['x-event-type']);
+        const event: EventMessage = {
+            messageId,
+            type,
+            payload,
+            status: EventConsumeStatus.RECEIVED,
+            properties: delivery.properties,
+            routingKey: delivery.routingKey || undefined
+        };
+        return this.process(event, {
+            attempt,
+            redelivered: delivery.redelivered,
+            rawContent: delivery.content
+        });
+    }
+
+    /** Processes one decoded event and returns the AMQP delivery disposition. */
+    async process(
+        event: EventMessage,
+        delivery: {attempt?: number; redelivered?: boolean; rawContent?: Buffer} = {}
+    ): Promise<DeliveryDisposition> {
+        const attempt = delivery.attempt ?? this.getAttemptFromHeaders(event.properties?.headers);
+        const maxAttempts = this.config.retryQueue?.maxAttempts ?? 3;
+        const match = event.type ? this.eventHandlerMap.get(event.type) : undefined;
+
+        if (!match && (this.config.ignoreUnknownEvents ?? true)) {
+            if (isLogLevelEnabled('debug')) log('debug', `[Processor] Ignored unknown event ${event.messageId}`);
+            return 'ack';
+        }
+
+        const claim = await this.claim(event, attempt);
+        if (claim.outcome === 'completed') {
+            this.emit({name: 'delivery.duplicate', messageId: event.messageId, attempt});
+            return 'ack';
+        }
+        if (claim.outcome === 'busy') {
+            this.emit({name: 'delivery.lease_busy', messageId: event.messageId, attempt});
+            const remainingLeaseMs = Math.max(0, claim.leaseExpiresAt - Date.now());
+            await this.sleep(Math.min(250, Math.max(25, remainingLeaseMs)));
+            return 'requeue';
+        }
+
+        if (attempt > maxAttempts) {
+            return this.deadLetterOrDiscard(
+                event,
+                attempt,
+                new Error(`Maximum delivery attempts (${maxAttempts}) exceeded`),
+                claim,
+                delivery.rawContent ?? Buffer.from(JSON.stringify(event.payload))
+            );
+        }
+
+        const controller = new AbortController();
+        this.activeControllers.add(controller);
+        const context: EventProcessingContext = {
+            signal: controller.signal,
+            attempt,
+            serviceId: this.serviceId,
+            instanceId: this.instanceId,
+            deliveryId: randomUUID(),
+            redelivered: delivery.redelivered ?? false,
+            fencingToken: claim.fencingToken
+        };
+        const startedAt = Date.now();
+
+        try {
+            const control = {skipEvent: false};
+            this.config.events?.onEventStart?.(event, control);
+            if (!control.skipEvent && match) {
+                await this.runHandler(event, match, context, controller);
             }
-            return;
+
+            const completed = await this.transition(event, claim, EventConsumeStatus.DONE);
+            if (!completed) return 'requeue';
+            this.safeOnSuccess(event);
+            this.emit({
+                name: 'consume.completed',
+                messageId: event.messageId,
+                attempt,
+                durationMs: Date.now() - startedAt
+            });
+            return 'ack';
+        } catch (error) {
+            const failure = this.asError(error);
+            if (failure instanceof IgnoredEventError) {
+                const completed = await this.transition(event, claim, EventConsumeStatus.DONE);
+                if (!completed) return 'requeue';
+                this.safeOnSuccess(event);
+                return 'ack';
+            }
+
+            if (failure instanceof ProcessingAbortedError) {
+                return 'requeue';
+            }
+
+            this.safeOnError(event, failure);
+            if (!this.config.retryQueue || attempt >= maxAttempts) {
+                return this.deadLetterOrDiscard(
+                    event,
+                    attempt,
+                    failure,
+                    claim,
+                    delivery.rawContent ?? Buffer.from(JSON.stringify(event.payload))
+                );
+            }
+
+            if (!(failure instanceof ProcessingTimeoutError)) {
+                try {
+                    const transitioned = await this.transition(event, claim, EventConsumeStatus.RETRY, failure);
+                    if (!transitioned) return 'requeue';
+                } catch (storeError) {
+                    log('error', `[Processor] Failed to persist retry status for ${event.messageId}`, storeError);
+                }
+            }
+            this.emit({name: 'consume.retry_scheduled', messageId: event.messageId, attempt, errorName: failure.name});
+            return this.retryDisposition();
+        } finally {
+            controller.abort();
+            this.activeControllers.delete(controller);
+        }
+    }
+
+    /** Cooperatively aborts every active handler generation. */
+    abortActive(): void {
+        for (const controller of this.activeControllers) controller.abort();
+    }
+
+    /** Calculates a one-based attempt from RabbitMQ-owned delivery headers. */
+    getDeliveryAttempt(delivery: RawMessageDelivery): number {
+        return this.getAttemptFromHeaders(delivery.properties.headers);
+    }
+
+    private async claim(event: EventMessage, attempt: number): Promise<ConsumeClaimResult> {
+        const store = this.config.store;
+        if (!store) {
+            return {outcome: 'acquired', fencingToken: randomUUID(), leaseExpiresAt: Number.MAX_SAFE_INTEGER};
+        }
+
+        if (store.claimConsumeEvent) {
+            return store.claimConsumeEvent({
+                event,
+                attempt,
+                serviceId: this.serviceId,
+                instanceId: this.instanceId,
+                leaseDurationMs: this.config.processingLeaseMs ?? 330000,
+                now: Date.now()
+            });
+        }
+
+        const existing = await store.getEvent(event);
+        if (existing?.status === EventConsumeStatus.DONE || existing?.status === EventConsumeStatus.ERROR) {
+            return {outcome: 'completed'};
+        }
+        if (!existing) await store.saveEvent({...event, status: EventConsumeStatus.PROCESSING});
+        await store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
+        return {outcome: 'acquired', fencingToken: undefined as never, leaseExpiresAt: Number.MAX_SAFE_INTEGER};
+    }
+
+    private async transition(
+        event: EventMessage,
+        claim: Extract<ConsumeClaimResult, {outcome: 'acquired'}>,
+        status: EventConsumeStatus.DONE | EventConsumeStatus.RETRY | EventConsumeStatus.ERROR,
+        error?: Error
+    ): Promise<boolean> {
+        const store = this.config.store;
+        if (!store) return true;
+        if (store.transitionConsumeEvent && claim.fencingToken !== undefined) {
+            return store.transitionConsumeEvent({
+                event,
+                fencingToken: claim.fencingToken,
+                serviceId: this.serviceId,
+                instanceId: this.instanceId,
+                status,
+                now: Date.now(),
+                error
+            });
+        }
+        await store.updateEventStatus(event, status);
+        return true;
+    }
+
+    private async runHandler(
+        event: EventMessage,
+        match: EventProcessConfig,
+        context: EventProcessingContext,
+        controller: AbortController
+    ): Promise<void> {
+        let rejectAbort!: (error: Error) => void;
+        const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
+        const onAbort = () => rejectAbort(new ProcessingAbortedError());
+        context.signal.addEventListener('abort', onAbort, {once: true});
+        const runner = async () => match.handler(event, context);
+        const operation = this.config.middleware?.length
+            ? applyMiddleware(this.config.middleware, event, runner)
+            : runner();
+        const timeoutMs = this.config.processingTimeoutMs ?? 300000;
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => {
+                reject(new ProcessingTimeoutError(timeoutMs));
+                controller.abort();
+            }, timeoutMs);
+        });
+
+        try {
+            await Promise.race([operation, deadline, aborted]);
+        } finally {
+            if (timeout) clearTimeout(timeout);
+            context.signal.removeEventListener('abort', onAbort);
+        }
+    }
+
+    private async handleMalformedDelivery(
+        delivery: RawMessageDelivery,
+        messageId: string,
+        attempt: number,
+        error: Error
+    ): Promise<DeliveryDisposition> {
+        const maxAttempts = this.config.retryQueue?.maxAttempts ?? 3;
+        if (this.config.retryQueue && attempt < maxAttempts) {
+            this.emit({name: 'consume.retry_scheduled', messageId, attempt, errorName: error.name});
+            return this.retryDisposition();
+        }
+
+        const event: EventMessage = {
+            messageId,
+            type: this.headerString(delivery.properties.type),
+            payload: null,
+            properties: delivery.properties,
+            routingKey: delivery.routingKey || undefined
+        };
+        const claim = await this.claim(event, attempt);
+        if (claim.outcome === 'completed') return 'ack';
+        if (claim.outcome === 'busy') {
+            const remainingLeaseMs = Math.max(0, claim.leaseExpiresAt - Date.now());
+            await this.sleep(Math.min(250, Math.max(25, remainingLeaseMs)));
+            return 'requeue';
+        }
+        return this.deadLetterOrDiscard(
+            event,
+            attempt,
+            new SyntaxError(`Malformed JSON: ${error.message}`),
+            claim,
+            delivery.content
+        );
+    }
+
+    private async deadLetterOrDiscard(
+        event: EventMessage,
+        attempt: number,
+        error: Error,
+        claim: Extract<ConsumeClaimResult, {outcome: 'acquired'}>,
+        content: Buffer
+    ): Promise<DeliveryDisposition> {
+        const deadLetterQueue = this.config.deadLetterQueue;
+        if (deadLetterQueue) {
+            try {
+                await this.config.broker.publishRaw(
+                    deadLetterQueue.queue,
+                    content,
+                    {
+                        ...event.properties,
+                        messageId: event.messageId,
+                        type: event.type,
+                        headers: {
+                            ...(event.properties?.headers ?? {}),
+                            'x-resilientmq-error-message': error.message,
+                            'x-resilientmq-error-name': error.name,
+                            'x-resilientmq-attempt': attempt,
+                            'x-resilientmq-original-queue': this.config.consumeQueue.queue,
+                            'x-resilientmq-service-id': this.serviceId
+                        }
+                    },
+                    {
+                        exchange: deadLetterQueue.exchange,
+                        routingKey: deadLetterQueue.exchange?.routingKey ?? event.routingKey
+                    }
+                );
+            } catch (publishError) {
+                log('error', `[Processor] Failed to confirm DLQ publication for ${event.messageId}`, publishError);
+                return this.retryDisposition();
+            }
         }
 
         try {
-            // onEventStart hook with skip control
-            const control = { skipEvent: false };
-            events?.onEventStart?.(event, control);
-            if (control.skipEvent) return;
-
-            // Fast path: find event handler
-            const match = event.type ? this.findEventHandler(event.type) : null;
-            if (match && isLogLevelEnabled('info')) {
-                log('info', `[Processor] Processing ${event.messageId} (type: ${event.type}, attempt: ${retryCount + 1})`);
-            }
-
-            // Hot-path optimization: ignore unknown events before any store I/O.
-            if (!match && ignoreUnknownEvents) {
-                if (isLogLevelEnabled('debug')) {
-                    log('debug', `[Processor] Unknown event ${event.messageId} skipped immediately`);
-                }
-                throw new UnknownEventDiscardError(`Unknown event type: ${event.type}`);
-            }
-
-            // Deduplication and early storage only if needed
-            let existing = null;
-            if (store) {
-                existing = await store.getEvent(event);
-                if (existing && retryCount === 0) {
-                    if (isLogLevelEnabled('warn')) {
-                        log('warn', `[Processor] Duplicate event: ${event.messageId}, skipping`);
-                    }
-                    return;
-                }
-                if (!existing && match) {
-                    await store.saveEvent(event);
-                }
-            }
-
-            // Unknown events (only when ignoreUnknownEvents=false at this point)
-            if (!match) {
-                if (store) {
-                    if (!existing) {
-                        await store.saveEvent(event);
-                    }
-                    await store.updateEventStatus(event, EventConsumeStatus.DONE);
-                }
-                if (isLogLevelEnabled('debug')) {
-                    log('debug', `[Processor] Unknown event ${event.messageId} type: ${event.type} marked as DONE`);
-                }
-                return;
-            }
-
-            // Execute handler with middleware
-            if (middleware?.length) {
-                const runner = async () => {
-                    if (store) await store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
-                    await match.handler(event);
-                    if (store) await store.updateEventStatus(event, EventConsumeStatus.DONE);
-                };
-                await applyMiddleware(middleware, event, runner);
-            } else {
-                if (store) await store.updateEventStatus(event, EventConsumeStatus.PROCESSING);
-                await match.handler(event);
-                if (store) await store.updateEventStatus(event, EventConsumeStatus.DONE);
-            }
-
-            events?.onSuccess?.(event);
-            if (isLogLevelEnabled('info')) {
-                log('info', `[Processor] Successfully processed ${event.messageId}`);
-            }
-
-        } catch (err) {
-            if (err instanceof UnknownEventDiscardError) {
-                throw err;
-            }
-
-            if (err instanceof IgnoredEventError) {
-                log('warn', `[Processor] Evento ${event.messageId} ignorado: ${err.message}`);
-                if (store) {
-                    await store.updateEventStatus(event, EventConsumeStatus.DONE);
-                }
-                events?.onSuccess?.(event);
-                return;
-            }
-
-            log('error', `[Processor] Error processing ${event.messageId}: ${(err as Error).message}`);
-
-            // Safety wrapper: failures in retry/DLQ logic must NOT propagate to avoid nack loops
-            try {
-                const currentAttempt = retryCount + 1;
-
-                if (currentAttempt >= maxAttempts) {
-                    await this.sendToDlqOrDiscard(event, currentAttempt, err as Error);
-                    return;
-                }
-
-                if (store) {
-                    await store.updateEventStatus(event, EventConsumeStatus.RETRY);
-                }
-                events?.onError?.(event, err as Error);
-
-                if (retryQueue) {
-                    await this.publishToRetryQueue(event, retryCount);
-                } else {
-                    await this.sendToDlqOrDiscard(event, currentAttempt, err as Error);
-                }
-            } catch (internalErr) {
-                // CRITICAL: if retry/DLQ publishing fails, ACK the message to prevent infinite loops
-                log('error', `[Processor] CRITICAL: Failed to handle error for ${event.messageId}. ` +
-                    `Original: ${(err as Error).message}. Internal: ${(internalErr as Error).message}`);
-            }
+            const transitioned = await this.transition(event, claim, EventConsumeStatus.ERROR, error);
+            if (!transitioned) return 'requeue';
+        } catch (storeError) {
+            log('error', `[Processor] Failed to persist terminal status for ${event.messageId}`, storeError);
+            return 'requeue';
         }
+        this.emit({name: 'consume.failed', messageId: event.messageId, attempt, errorName: error.name});
+        if (deadLetterQueue) this.emit({name: 'consume.dead_lettered', messageId: event.messageId, attempt});
+        return 'ack';
     }
 
-    // ─── Private helpers ───────────────────────────────────────────────────────
-
-    /**
-     * Optimized event handler lookup using cached Map for O(1) performance.
-     */
-    private findEventHandler(eventType: string): any {
-        return this.eventHandlerMap.get(eventType) || null;
+    private retryDisposition(): DeliveryDisposition {
+        return this.config.retryQueue ? 'reject' : 'requeue';
     }
 
-    private getRetryCount(event: EventMessage): number {
-        const headers = event.properties?.headers;
-        if (!headers) return 0;
-
-        if (headers['x-retry-count'] != null) {
-            const val = Number(headers['x-retry-count']);
-            return Number.isFinite(val) && val >= 0 ? Math.floor(val) : 0;
-        }
-
-        // Fallback for in-flight messages during upgrades.
-        // Only use x-death entries from the current consume queue to avoid
-        // counting retries produced by other consumers/services.
-        const death = headers['x-death'];
-        if (Array.isArray(death) && death.length > 0) {
-            const consumeQueue = this.config.consumeQueue.queue;
-            const fromCurrentQueue = death.find((d: any) => d?.queue === consumeQueue);
-            const rawCount = fromCurrentQueue?.count;
-            const val = Number(rawCount !== undefined && rawCount !== null ? rawCount : 0);
-            return Number.isFinite(val) && val >= 0 ? Math.floor(val) : 0;
-        }
-
-        return 0;
+    private async sleep(ms: number): Promise<void> {
+        await new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    private async sendToDlqOrDiscard(event: EventMessage, retryCount: number, err: Error): Promise<void> {
-        if (this.config.store) {
-            await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
-        }
-        /* istanbul ignore next */
-        this.config.events?.onError?.(event, err);
-
-        if (this.config.deadLetterQueue) {
-            const reason = (err as any).reason !== undefined ? (err as any).reason : 'rejected';
-            const existingFirstDeathReason = event.properties?.headers?.['x-first-death-reason']; // eslint-disable-line
-            const existingFirstDeathQueue = event.properties?.headers?.['x-first-death-queue']; // eslint-disable-line
-            /* istanbul ignore next */
-            const dlqRoutingKey = this.config.deadLetterQueue.exchange?.routingKey ?? event.routingKey;
-            const dlqEvent: EventMessage = {
-                ...event,
-                routingKey: dlqRoutingKey,
-                properties: {
-                    ...event.properties,
-                    headers: {
-                        ...event.properties?.headers,
-                        'x-error-message': err.message,
-                        'x-error-name': err.name,
-                        /* istanbul ignore next */
-                        'x-error-stack': err.stack ?? '',
-                        'x-death-count': retryCount,
-                        'x-death-reason': reason,
-                        'x-death-time': new Date().toISOString(),
-                        'x-original-queue': this.config.consumeQueue.queue,
-                        'x-first-death-reason': existingFirstDeathReason !== undefined ? existingFirstDeathReason : reason,
-                        'x-first-death-queue': existingFirstDeathQueue !== undefined ? existingFirstDeathQueue : this.config.consumeQueue.queue,
-                    },
-                },
-            };
-
-            await this.config.broker.publish(
-                this.config.deadLetterQueue.queue,
-                dlqEvent,
-                this.config.deadLetterQueue.exchange ? { exchange: this.config.deadLetterQueue.exchange } : undefined
-            );
-            log('info', `[Processor] Message ${event.messageId} sent to DLQ`);
-            return;
-        }
-
-        log('warn', `[Processor] Message ${event.messageId} discarded (no DLQ configured)`);
-    }
-
-    private async publishToRetryQueue(event: EventMessage, retryCount: number): Promise<void> {
-        const retryQueue = this.config.retryQueue!;
-        const nextRetryCount = retryCount + 1;
-        /* istanbul ignore next */
-        const maxAttempts = retryQueue.maxAttempts ?? 3;
-        log('warn', `[Processor] Retrying ${event.messageId} (attempt ${nextRetryCount}/${maxAttempts})`);
-
-        const retryEvent: EventMessage = {
-            ...event,
-            routingKey: retryQueue.exchange?.routingKey ?? event.routingKey,
-            properties: {
-                ...event.properties,
-                headers: { ...event.properties?.headers, 'x-retry-count': nextRetryCount },
-            },
-        };
-
-        await this.config.broker.publish(
-            retryQueue.queue,
-            retryEvent,
-            retryQueue.exchange ? { exchange: retryQueue.exchange } : undefined
+    private getAttemptFromHeaders(headers: Record<string, unknown> | undefined): number {
+        let previousFailures = 0;
+        const deliveryCount = Math.max(
+            this.nonNegativeInteger(headers?.['x-delivery-count']),
+            this.nonNegativeInteger(headers?.['x-acquired-count'])
         );
+        previousFailures = Math.max(previousFailures, deliveryCount);
+
+        const deaths = headers?.['x-death'];
+        if (Array.isArray(deaths)) {
+            for (const death of deaths) {
+                if (!death || typeof death !== 'object') continue;
+                const entry = death as Record<string, unknown>;
+                if (entry.queue !== this.config.consumeQueue.queue || entry.reason !== 'rejected') continue;
+                previousFailures = Math.max(previousFailures, this.nonNegativeInteger(entry.count));
+            }
+        }
+        return previousFailures + 1;
+    }
+
+    private resolveMessageId(delivery: RawMessageDelivery): string {
+        return this.headerString(delivery.properties.messageId)
+            ?? this.headerString(delivery.properties.headers?.['x-message-id'])
+            ?? createHash('sha256')
+                .update(delivery.exchange)
+                .update('\0')
+                .update(delivery.routingKey)
+                .update('\0')
+                .update(delivery.content)
+                .digest('hex');
+    }
+
+    private nonNegativeInteger(value: unknown): number {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+    }
+
+    private headerString(value: unknown): string | undefined {
+        return typeof value === 'string' && value.length > 0 ? value : undefined;
+    }
+
+    private hashService(value: string): string {
+        return createHash('sha256').update(value).digest('hex');
+    }
+
+    private safeOnError(event: EventMessage, error: Error): void {
+        try {
+            this.config.events?.onError?.(event, error);
+        } catch (hookError) {
+            log('warn', `[Processor] onError hook failed for ${event.messageId}`, hookError);
+        }
+    }
+
+    private safeOnSuccess(event: EventMessage): void {
+        try {
+            this.config.events?.onSuccess?.(event);
+        } catch (hookError) {
+            log('warn', `[Processor] onSuccess hook failed for ${event.messageId}`, hookError);
+        }
+    }
+
+    private emit(event: Omit<ResilienceMetricEvent, 'timestamp' | 'serviceId' | 'instanceId'>): void {
+        try {
+            const result = this.config.metricsSink?.emit({
+                ...event,
+                timestamp: Date.now(),
+                serviceId: this.serviceId,
+                instanceId: this.instanceId
+            });
+            if (result && typeof result.catch === 'function') result.catch(() => undefined);
+        } catch {}
+    }
+
+    private asError(error: unknown): Error {
+        return error instanceof Error ? error : new Error(String(error));
     }
 }

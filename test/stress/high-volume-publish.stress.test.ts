@@ -3,6 +3,7 @@ import { MetricsCollector } from '../utils/metrics-collector';
 import { ResilientEventPublisher } from '../../src/resilience/resilient-event-publisher';
 import { EventStoreMock } from '../utils/event-store-mock';
 import { createTestEvent } from '../fixtures/events';
+import {RabbitMQHelpers} from '../utils/rabbitmq-helpers';
 
 describe('Stress Test: High Volume Publishing', () => {
     let containerManager: TestContainersManager;
@@ -10,14 +11,17 @@ describe('Stress Test: High Volume Publishing', () => {
     let publisher: ResilientEventPublisher;
     let store: EventStoreMock;
     let metricsCollector: MetricsCollector;
+    let rabbitMQHelpers: RabbitMQHelpers;
 
     beforeAll(async () => {
         containerManager = new TestContainersManager();
         await containerManager.startRabbitMQ();
         connectionUrl = containerManager.getConnectionUrl();
+        rabbitMQHelpers = new RabbitMQHelpers(connectionUrl);
     }, 60000);
 
     afterAll(async () => {
+        await rabbitMQHelpers.disconnect();
         await containerManager.stopAll();
     }, 30000);
 
@@ -37,13 +41,13 @@ describe('Stress Test: High Volume Publishing', () => {
     it('should handle 10000 concurrent messages with error rate < 1%', async () => {
         const messageCount = 10000;
         const testQueue = `stress-test-high-volume-${Date.now()}`;
+        await rabbitMQHelpers.assertQueue(testQueue);
 
         publisher = new ResilientEventPublisher({
             connection: connectionUrl,
             queue: testQueue,
             store,
-            instantPublish: true,
-            idleTimeoutMs: 0 // Disable idle timeout for stress test
+            instantPublish: true
         });
 
         metricsCollector.start();
