@@ -3,20 +3,24 @@ import { TestContainersManager } from '../utils/test-containers';
 import { EventStoreMock } from '../utils/event-store-mock';
 import { EventBuilder, PublisherConfigBuilder } from '../utils/test-data-builders';
 import { EventPublishStatus } from '../../src/types/enum/event-publish-status';
+import {RabbitMQHelpers} from '../utils/rabbitmq-helpers';
 
 describe('Integration: Persistence with EventStore', () => {
     let containerManager: TestContainersManager;
     let connectionUrl: string;
     let publisher: ResilientEventPublisher;
     let store: EventStoreMock;
+    let rabbitMQHelpers: RabbitMQHelpers;
 
     beforeAll(async () => {
         containerManager = new TestContainersManager();
         await containerManager.startRabbitMQ();
         connectionUrl = containerManager.getConnectionUrl();
+        rabbitMQHelpers = new RabbitMQHelpers(connectionUrl);
     }, 60000);
 
     afterAll(async () => {
+        await rabbitMQHelpers.disconnect();
         await containerManager.stopAll();
     }, 30000);
 
@@ -27,7 +31,7 @@ describe('Integration: Persistence with EventStore', () => {
     afterEach(async () => {
         if (publisher) {
             try {
-                publisher.stopPendingEventsCheck();
+                await publisher.disconnect();
             } catch (error) {
                 // Ignore cleanup errors
             }
@@ -78,6 +82,7 @@ describe('Integration: Persistence with EventStore', () => {
     }, 30000);
 
     it('should process pending events and update status to PUBLISHED', async () => {
+        await rabbitMQHelpers.assertQueue('test.pending.queue');
         // Arrange
         const event1 = new EventBuilder()
             .withType('order.created')
@@ -124,6 +129,7 @@ describe('Integration: Persistence with EventStore', () => {
     }, 30000);
 
     it('should process pending events in chronological order', async () => {
+        await rabbitMQHelpers.assertQueue('test.order.queue');
         // Arrange
         const now = Date.now();
 
@@ -177,6 +183,7 @@ describe('Integration: Persistence with EventStore', () => {
     }, 30000);
 
     it('should handle mixed instant and deferred publishing', async () => {
+        await rabbitMQHelpers.assertQueue('test.mixed.queue');
         // Arrange
         const instantEvent = new EventBuilder()
             .withType('notification.instant')

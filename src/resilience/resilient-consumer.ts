@@ -1,424 +1,372 @@
-import { ResilientEventConsumeProcessor } from './resilient-event-consume-processor';
-import { AmqpQueue } from '../broker/amqp-queue';
-import { log } from '../logger/logger';
-import { EventMessage, RabbitMQResilientProcessorConfig, ResilientConsumerConfig } from '../types';
-import { EventConsumeStatus } from '../types/enum/event-consume-status';
+import {createHash, randomUUID} from 'crypto';
+import {AmqpQueue} from '../broker/amqp-queue';
+import {log} from '../logger/logger';
+import {MetricsCollector, MetricsSink, ResilienceMetricEvent, ResilientMQMetrics} from '../metrics/metrics-collector';
+import {
+    RabbitMQResilientProcessorConfig,
+    ResilientConsumerConfig
+} from '../types';
+import {ResilientEventConsumeProcessor} from './resilient-event-consume-processor';
 
+/** Long-lived resilient consumer driven by AMQP heartbeat and lifecycle events. */
 export class ResilientConsumer {
-    private processor!: ResilientEventConsumeProcessor;
-    private queue!: AmqpQueue;
-    private uptimeTimer?: ReturnType<typeof setTimeout>;
-    private heartbeatTimer?: ReturnType<typeof setInterval>;
-    private idleMonitorTimer?: ReturnType<typeof setInterval>;
-    private reconnecting = false;
-    private storeConnected = false;
-    private storeReconnectInFlight?: Promise<void>;
-    private lastStoreReconnectAttemptAt = 0;
-    private hasLoggedConsumeStart = false;
+    private processor?: ResilientEventConsumeProcessor;
+    private queue?: AmqpQueue;
+    private recoveryPromise?: Promise<void>;
+    private cancelRecoveryDelay?: () => void;
+    private startPromise?: Promise<void>;
+    private stopPromise?: Promise<void>;
+    private desiredRunning = false;
+    private generation = 0;
     private _processingCount = 0;
-    private sigTermHandler?: () => void;
-    private sigIntHandler?: () => void;
-
-    /** Number of event handlers currently executing. */
-    get processingCount(): number { return this._processingCount; }
-
-    /**
-     * Metrics are intentionally disabled in consumer runtime to minimize overhead.
-     */
-    public getMetrics(): undefined {
-        return undefined;
-    }
+    private readonly instanceId = randomUUID();
+    private readonly serviceId: string;
+    private readonly metrics?: MetricsCollector;
+    private readonly metricsSink?: MetricsSink;
 
     constructor(private readonly config: ResilientConsumerConfig) {
         this.validateConfig();
+        this.serviceId = createHash('sha256')
+            .update(config.serviceId ?? config.consumeQueue.queue)
+            .update('\0')
+            .update(config.consumeQueue.queue)
+            .digest('hex');
+        this.metrics = config.metricsEnabled ? new MetricsCollector() : undefined;
+        this.metricsSink = this.composeMetricsSink(this.metrics, config.metricsSink);
     }
 
-    // ─── Public API ────────────────────────────────────────────────────────────
+    /** Number of handlers currently executing in this process. */
+    get processingCount(): number { return this._processingCount; }
 
-    /** Starts the consumer. Registers SIGTERM/SIGINT handlers for graceful shutdown. */
-    public async start(): Promise<void> {
-        if (this.config.store) {
-            try {
-                await this.checkStoreConnection();
-                this.lastStoreReconnectAttemptAt = 0;
-            } catch {
-                throw new Error('Failed to initialize consumer: store connection failed');
-            }
-        }
+    /** Returns the optional in-process aggregate snapshot. */
+    getMetrics(): ResilientMQMetrics | undefined { return this.metrics?.getSnapshot(); }
 
-        log('info', `[Consumer] Starting (prefetch: ${/* istanbul ignore next */ this.config.prefetch ?? 1})`);
-        await this.setupAndConsume();
-
-        this.sigTermHandler = () => this.stop();
-        this.sigIntHandler = () => this.stop();
-        process.once('SIGTERM', this.sigTermHandler);
-        process.once('SIGINT', this.sigIntHandler);
+    /** Starts the consumer and establishes its first AMQP generation. */
+    async start(): Promise<void> {
+        if (this.startPromise) return this.startPromise;
+        this.startPromise = this.startInternal().finally(() => {
+            this.startPromise = undefined;
+        });
+        return this.startPromise;
     }
 
-    /** Stops the consumer gracefully: waits for in-flight messages, reverts RETRY events, closes connections. */
-    public async stop(): Promise<void> {
-        log('info', '[Consumer] Stopping...');
-
-        if (this.sigTermHandler) { process.removeListener('SIGTERM', this.sigTermHandler); this.sigTermHandler = undefined; }
-        if (this.sigIntHandler) { process.removeListener('SIGINT', this.sigIntHandler); this.sigIntHandler = undefined; }
-
-        await this.waitForProcessing();
-        await this.revertRetryEvents();
-        this.stopTimers();
-
+    private async startInternal(): Promise<void> {
+        if (this.stopPromise) await this.stopPromise;
+        if (this.desiredRunning) return;
+        this.desiredRunning = true;
+        this.generation++;
         try {
-            if (this.queue && !this.queue.closed) {
-                await this.queue.cancelAllConsumers();
-                await this.queue.disconnect();
-            }
+            await this.checkStoreConnection();
+            await this.startGeneration(this.generation);
         } catch (error) {
-            log('error', '[Consumer] Error during stop', error);
+            this.desiredRunning = false;
+            await this.queue?.forceClose();
+            throw error;
         }
+    }
 
+    /** Cancels deliveries first, drains bounded work and closes the active generation. */
+    async stop(): Promise<void> {
+        if (this.stopPromise) return this.stopPromise;
+        this.desiredRunning = false;
+        this.generation++;
+        this.cancelRecoveryDelay?.();
+        this.stopPromise = this.stopInternal().finally(() => {
+            this.stopPromise = undefined;
+        });
+        return this.stopPromise;
+    }
+
+    private async stopInternal(): Promise<void> {
+        const processor = this.processor;
+        const queue = this.queue;
+        this.processor = undefined;
+        this.queue = undefined;
+        processor?.abortActive();
+        if (!queue) return;
+
+        const timeoutMs = this.config.shutdownTimeoutMs ?? 30000;
+        await queue.cancelAllConsumers();
+        const drained = await queue.waitForProcessing(timeoutMs);
+        if (drained) await queue.disconnect(Math.min(5000, timeoutMs));
+        else await queue.forceClose();
         log('info', '[Consumer] Stopped');
     }
 
-    // ─── Setup ─────────────────────────────────────────────────────────────────
+    private async startGeneration(generation: number): Promise<void> {
+        const queue = new AmqpQueue(this.config.connection);
+        this.queue = queue;
+        queue.onDisconnect(disconnect => {
+            this.emit({
+                name: 'broker.disconnected',
+                errorName: disconnect.error?.name
+            });
+            this.requestRecovery(generation);
+        });
 
-    private async setupAndConsume(): Promise<void> {
-        const { consumeQueue, prefetch, store } = this.config;
-        const queueName = consumeQueue.queue;
-
-        this.queue = new AmqpQueue(this.config.connection);
-        await this.queue.connect(/* istanbul ignore next */ prefetch ?? 1);
-
-        await this.setupQueuesAndExchanges();
-
-        if (store && !this.storeConnected) {
-            await this.checkStoreConnection();
+        await queue.connect(this.config.prefetch ?? 1);
+        if (!this.desiredRunning || generation !== this.generation) {
+            await queue.forceClose();
+            return;
         }
 
-        this.processor = new ResilientEventConsumeProcessor({
+        await this.setupQueuesAndExchanges(queue);
+        const processor = new ResilientEventConsumeProcessor({
             ...this.config,
-            ignoreUnknownEvents: this.config.ignoreUnknownEvents ?? true,
-            broker: this.queue,
+            broker: queue,
+            resolvedServiceId: this.serviceId,
+            instanceId: this.instanceId,
+            metricsSink: this.metricsSink
         } as RabbitMQResilientProcessorConfig);
+        this.processor = processor;
 
-        const hasStore = !!store;
-
-        await this.queue.consume(queueName, async (event: EventMessage) => {
+        await queue.consumeRaw(this.config.consumeQueue.queue, async delivery => {
+            if (!this.desiredRunning || generation !== this.generation) return 'requeue';
             this._processingCount++;
             try {
-                if (hasStore && !this.storeConnected) {
-                    await this.ensureStoreConnection();
-                }
-                await this.processor.process(event);
+                return await processor.processRaw(delivery);
             } catch (error) {
-                if (this.shouldSuppressProcessorError(error, event.messageId)) {
-                    return;
-                }
-                log('error', `[Consumer] Error processing message ${event.messageId}`, error);
-                throw error;
+                log('error', '[Consumer] Delivery could not be processed safely', error);
+                await this.sleep(this.config.storeConnectionRetryDelayMs ?? 1000);
+                return 'requeue';
             } finally {
                 this._processingCount--;
             }
         });
 
-        if (!this.hasLoggedConsumeStart) {
-            log('info', `[Consumer] Consuming from: ${queueName}`);
-            this.hasLoggedConsumeStart = true;
-        }
-        this.scheduleReconnection();
-        this.startHeartbeat();
-        await this.startIdleMonitor();
+        this.emit({name: 'broker.connected'});
+        log('info', `[Consumer] Consuming ${this.config.consumeQueue.queue} with prefetch ${this.config.prefetch ?? 1}`);
     }
 
-    private async setupQueuesAndExchanges(): Promise<void> {
-        const channel = this.queue.channel;
-        const { queue: consumeQueue, options, exchanges } = this.config.consumeQueue;
+    private requestRecovery(failedGeneration: number): void {
+        if (!this.desiredRunning || failedGeneration !== this.generation || this.recoveryPromise) return;
+        this.recoveryPromise = this.recover(failedGeneration).finally(() => {
+            this.recoveryPromise = undefined;
+        });
+    }
+
+    private async recover(failedGeneration: number): Promise<void> {
+        if (failedGeneration !== this.generation) return;
+        this.generation++;
+        const recoveryGeneration = this.generation;
+        const oldProcessor = this.processor;
+        const oldQueue = this.queue;
+        this.processor = undefined;
+        this.queue = undefined;
+        oldProcessor?.abortActive();
+
+        if (oldQueue) {
+            await oldQueue.cancelAllConsumers();
+            await oldQueue.forceClose();
+        }
+
+        const initialDelay = this.config.reconnectDelayMs ?? 250;
+        const maximumDelay = this.config.reconnectMaxDelayMs ?? 30000;
+        let delay = initialDelay;
+
+        while (this.desiredRunning && recoveryGeneration === this.generation) {
+            await this.recoveryDelay(this.withJitter(delay));
+            try {
+                await this.startGeneration(recoveryGeneration);
+                return;
+            } catch (error) {
+                log('error', `[Consumer] Recovery attempt failed; retrying in ${delay}ms`, error);
+                await (this.queue as AmqpQueue | undefined)?.forceClose();
+                this.queue = undefined;
+                delay = Math.min(maximumDelay, Math.max(initialDelay, delay * 2));
+            }
+        }
+    }
+
+    private async setupQueuesAndExchanges(queue: AmqpQueue): Promise<void> {
+        const channel = queue.channel;
+        const {queue: consumeQueue, options, exchanges} = this.config.consumeQueue;
         const deadLetterQueue = this.config.deadLetterQueue;
         const retryQueue = this.config.retryQueue;
+        let retryExchangeName = '';
 
-        // Dead letter queue
-        let dlqExchangeName = '';
         if (deadLetterQueue) {
-            const { queue: dlqName, exchange: dlqExchange, options: dlqOptions } = deadLetterQueue;
-            if (dlqExchange) {
-                dlqExchangeName = dlqExchange.name;
-                await channel.assertExchange(dlqExchange.name, dlqExchange.type, dlqExchange.options);
+            const deadExchange = deadLetterQueue.exchange;
+            if (deadExchange) {
+                await channel.assertExchange(deadExchange.name, deadExchange.type, deadExchange.options);
             }
-            await channel.assertQueue(dlqName, dlqOptions);
-            if (dlqExchange) {
-                await channel.bindQueue(dlqName, dlqExchange.name, /* istanbul ignore next */ dlqExchange.routingKey ?? '');
+            await channel.assertQueue(deadLetterQueue.queue, deadLetterQueue.options);
+            if (deadExchange) {
+                await channel.bindQueue(
+                    deadLetterQueue.queue,
+                    deadExchange.name,
+                    deadExchange.routingKey ?? ''
+                );
             }
         }
 
-        // Retry queue
-        let retryExchangeName = '';
         if (retryQueue) {
-            const { queue: retryQueueName, exchange: retryExchange, options: retryOptions } = retryQueue;
-            const ttl = /* istanbul ignore next */ retryQueue.ttlMs ?? 5000;
-
-            let retryDlxExchange = '';
-            let retryDlxRoutingKey = '';
-            if (exchanges?.length) {
-                const mainExchange = exchanges.find((e: any) => e.routingKey) || /* istanbul ignore next */ exchanges[0];
-                retryDlxExchange = mainExchange.name;
-                retryDlxRoutingKey = /* istanbul ignore next */ mainExchange.routingKey ?? '';
-            } else {
-                retryDlxRoutingKey = consumeQueue;
-            }
-
+            const retryExchange = retryQueue.exchange;
             if (retryExchange) {
                 retryExchangeName = retryExchange.name;
                 await channel.assertExchange(retryExchange.name, retryExchange.type, retryExchange.options);
             }
-
-            await channel.assertQueue(retryQueueName, {
-                ...retryOptions,
+            await channel.assertQueue(retryQueue.queue, {
+                ...retryQueue.options,
                 arguments: {
-                    /* istanbul ignore next */
-                    ...retryOptions?.arguments,
-                    'x-dead-letter-exchange': retryDlxExchange,
-                    'x-dead-letter-routing-key': retryDlxRoutingKey,
-                    'x-message-ttl': ttl,
-                },
+                    ...(retryQueue.options?.arguments ?? {}),
+                    'x-dead-letter-exchange': '',
+                    'x-dead-letter-routing-key': consumeQueue,
+                    'x-message-ttl': retryQueue.ttlMs ?? 5000
+                }
             });
-
             if (retryExchange) {
-                await channel.bindQueue(retryQueueName, retryExchange.name, /* istanbul ignore next */ retryExchange.routingKey ?? '');
+                await channel.bindQueue(retryQueue.queue, retryExchange.name, retryExchange.routingKey ?? '');
             }
         }
 
-        // Main queue
-        /* istanbul ignore next */
-        const mainQueueArgs: any = { ...options?.arguments };
+        const mainQueueArguments: Record<string, unknown> = {...(options?.arguments ?? {})};
         if (this.config.singleActiveConsumer !== undefined) {
-            mainQueueArgs['x-single-active-consumer'] = this.config.singleActiveConsumer;
+            mainQueueArguments['x-single-active-consumer'] = this.config.singleActiveConsumer;
         }
-
         if (retryQueue) {
-            mainQueueArgs['x-dead-letter-exchange'] = retryExchangeName || '';
-            mainQueueArgs['x-dead-letter-routing-key'] = retryExchangeName
-                ? /* istanbul ignore next */ (retryQueue.exchange?.routingKey ?? '')
+            mainQueueArguments['x-dead-letter-exchange'] = retryExchangeName;
+            mainQueueArguments['x-dead-letter-routing-key'] = retryExchangeName
+                ? retryQueue.exchange?.routingKey ?? ''
                 : retryQueue.queue;
-        } else if (deadLetterQueue && dlqExchangeName) {
-            mainQueueArgs['x-dead-letter-exchange'] = dlqExchangeName;
-            mainQueueArgs['x-dead-letter-routing-key'] = /* istanbul ignore next */ deadLetterQueue.exchange?.routingKey ?? '';
         }
 
-        if (exchanges?.length) {
-            for (const ex of exchanges) {
-                await channel.assertExchange(ex.name, ex.type, ex.options);
+        if (exchanges) {
+            for (const exchange of exchanges) {
+                await channel.assertExchange(exchange.name, exchange.type, exchange.options);
             }
-            await channel.assertQueue(consumeQueue, { ...options, arguments: mainQueueArgs });
-            for (const ex of exchanges) {
-                await channel.bindQueue(consumeQueue, ex.name, /* istanbul ignore next */ ex.routingKey ?? '');
+        }
+        await channel.assertQueue(consumeQueue, {...options, arguments: mainQueueArguments});
+        if (exchanges) {
+            for (const exchange of exchanges) {
+                await channel.bindQueue(consumeQueue, exchange.name, exchange.routingKey ?? '');
             }
-        } else {
-            await channel.assertQueue(consumeQueue, { ...options, arguments: mainQueueArgs });
         }
     }
-
-    // ─── Timers ────────────────────────────────────────────────────────────────
-
-    private scheduleReconnection(): void {
-        const maxUptime = this.config.maxUptimeMs ?? 0;
-        if (maxUptime > 0) {
-            this.uptimeTimer = setTimeout(() => this.reconnect(), maxUptime);
-        }
-    }
-
-    private startHeartbeat(): void {
-        const interval = /* istanbul ignore next */ this.config.heartbeatIntervalMs ?? 30000;
-        const queueName = this.config.consumeQueue.queue;
-        this.heartbeatTimer = setInterval(async () => {
-            try {
-                await this.queue.channel.checkQueue(queueName);
-            } catch (error) {
-                log('error', '[Consumer] Heartbeat failed', error);
-                await this.reconnect();
-            }
-        }, interval);
-    }
-
-    private async startIdleMonitor(): Promise<void> {
-        if (!this.config.exitIfIdle) return;
-
-        /* istanbul ignore next */
-        const checkInterval = this.config.idleCheckIntervalMs ?? 10000;
-        /* istanbul ignore next */
-        const maxIdle = this.config.maxIdleChecks ?? 3;
-        const queueName = this.config.consumeQueue.queue;
-        const retryQueueName = this.config.retryQueue?.queue;
-        let idleCount = 0;
-
-        this.idleMonitorTimer = setInterval(async () => {
-            if (this.reconnecting) return;
-            try {
-                let totalMessages = 0;
-                const main = await this.queue.channel.checkQueue(queueName);
-                totalMessages += main.messageCount;
-
-                if (retryQueueName) {
-                    const retry = await this.queue.channel.checkQueue(retryQueueName);
-                    totalMessages += retry.messageCount;
-                }
-
-                const total = totalMessages + /* istanbul ignore next */ (this.queue?.processingMessages ?? 0);
-                idleCount = total === 0 ? idleCount + 1 : /* istanbul ignore next */ 0;
-
-                if (idleCount >= maxIdle) {
-                    log('warn', '[Consumer] Max idle checks reached, stopping...');
-                    await this.stop();
-                }
-            } catch (error) {
-                log('error', '[Consumer] Idle check error', error);
-            }
-        }, checkInterval);
-    }
-
-    private stopTimers(): void {
-        if (this.uptimeTimer) { clearTimeout(this.uptimeTimer); this.uptimeTimer = undefined; }
-        if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = undefined; }
-        if (this.idleMonitorTimer) { clearInterval(this.idleMonitorTimer); this.idleMonitorTimer = undefined; }
-    }
-
-    // ─── Reconnection ──────────────────────────────────────────────────────────
-
-    private async reconnect(): Promise<void> {
-        if (this.reconnecting) return;
-        this.reconnecting = true;
-        const queue = this.queue;
-
-        await this.waitForProcessing();
-        this.stopTimers();
-
-        try {
-            await queue.cancelAllConsumers();
-            await queue.channel.close();
-            /* istanbul ignore next */
-            const socket = (queue.connection as any)?.connection?.stream;
-            /* istanbul ignore next */
-            if (socket?.writable) await queue.connection.close();
-        } catch (err) {
-            log('error', '[Consumer] Error during reconnect cleanup', err);
-        }
-
-        /* istanbul ignore next */
-        const delay = this.config.reconnectDelayMs ?? 10000;
-        setTimeout(() => {
-            this.reconnecting = false;
-            this.setupAndConsume().catch(err => log('error', '[Consumer] Failed to restart', err));
-        }, delay);
-    }
-
-    // ─── Shutdown helpers ──────────────────────────────────────────────────────
-
-    private async waitForProcessing(): Promise<void> {
-        if (!this.queue || typeof this.queue.waitForProcessing !== 'function') return;
-        await this.queue.waitForProcessing();
-    }
-
-    private async revertRetryEvents(): Promise<void> {
-        if (!this.config.store || typeof this.config.store.getEventsByStatus !== 'function') return;
-        try {
-            const retryEvents = await this.config.store.getEventsByStatus!(EventConsumeStatus.RETRY);
-            for (const event of retryEvents) {
-                await this.config.store.updateEventStatus(event, EventConsumeStatus.ERROR);
-            }
-            if (retryEvents.length > 0) {
-                log('warn', `[Consumer] Reverted ${retryEvents.length} RETRY event(s) to ERROR on shutdown`);
-            }
-        } catch (error) {
-            log('error', '[Consumer] Error reverting RETRY events', error);
-        }
-    }
-
-    // ─── Store connection ──────────────────────────────────────────────────────
 
     private async checkStoreConnection(): Promise<void> {
-        if (!this.config.store) { this.storeConnected = false; return; }
+        const store = this.config.store;
+        if (!store) return;
+        const attempts = this.config.storeConnectionRetries ?? 3;
+        const delay = this.config.storeConnectionRetryDelayMs ?? 1000;
+        let lastError: unknown;
 
-        /* istanbul ignore next */
-        const maxRetries = this.config.storeConnectionRetries ?? 3;
-        /* istanbul ignore next */
-        const retryDelay = this.config.storeConnectionRetryDelayMs ?? 1000;
-
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        for (let attempt = 1; attempt <= attempts; attempt++) {
             try {
-                await this.config.store.getEvent({ messageId: '8f747bb4-ca0a-4ef7-b479-d9183db942eb', type: '__health_check__', payload: {} });
-                this.storeConnected = true;
+                await store.getEvent({messageId: '__resilientmq_health__', type: '__health__', payload: null});
                 return;
-            } catch {
-                if (attempt === maxRetries) {
-                    this.storeConnected = false;
-                    throw new Error(`Failed to connect to store after ${maxRetries} attempts`);
-                }
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            } catch (error) {
+                lastError = error;
+                if (attempt < attempts) await this.sleep(delay);
             }
         }
+        const detail = lastError instanceof Error ? `: ${lastError.message}` : '';
+        throw new Error(`Failed to connect to store after ${attempts} attempts${detail}`);
     }
 
-    /**
-     * Ensures store reconnection checks are done at most once per retry interval
-     * and shared across concurrent message handlers when store is disconnected.
-     */
-    private async ensureStoreConnection(): Promise<void> {
-        if (!this.config.store) {
-            this.storeConnected = false;
-            return;
-        }
+    private composeMetricsSink(first?: MetricsSink, second?: MetricsSink): MetricsSink | undefined {
+        const sinks = [first, second].filter((sink): sink is MetricsSink => sink !== undefined);
+        if (sinks.length === 0) return undefined;
+        return {
+            emit: event => {
+                for (const sink of sinks) {
+                    try {
+                        const result = sink.emit(event);
+                        if (result && typeof result.catch === 'function') result.catch(() => undefined);
+                    } catch {}
+                }
+            }
+        };
+    }
 
-        if (this.storeConnected) {
-            return;
-        }
+    private emit(event: Omit<ResilienceMetricEvent, 'timestamp' | 'serviceId' | 'instanceId'>): void {
+        try {
+            const result = this.metricsSink?.emit({
+                ...event,
+                timestamp: Date.now(),
+                serviceId: this.serviceId,
+                instanceId: this.instanceId
+            });
+            if (result && typeof result.catch === 'function') result.catch(() => undefined);
+        } catch {}
+    }
 
-        if (this.storeReconnectInFlight) {
-            await this.storeReconnectInFlight;
-            return;
-        }
+    private withJitter(delay: number): number {
+        return Math.max(1, Math.round(delay * (0.8 + Math.random() * 0.4)));
+    }
 
-        const now = Date.now();
-        const minInterval = this.config.storeConnectionRetryDelayMs ?? 1000;
-        if ((now - this.lastStoreReconnectAttemptAt) < minInterval) {
-            throw new Error('[Consumer] Store reconnect throttled: waiting for next retry window');
-        }
+    private async sleep(ms: number): Promise<void> {
+        await new Promise(resolve => setTimeout(resolve, ms));
+    }
 
-        this.lastStoreReconnectAttemptAt = now;
-        this.storeReconnectInFlight = this.checkStoreConnection().finally(() => {
-            this.storeReconnectInFlight = undefined;
+    private async recoveryDelay(ms: number): Promise<void> {
+        await new Promise<void>(resolve => {
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (this.cancelRecoveryDelay === finish) this.cancelRecoveryDelay = undefined;
+                resolve();
+            };
+            const timer = setTimeout(finish, ms);
+            this.cancelRecoveryDelay = finish;
         });
-
-        await this.storeReconnectInFlight;
     }
-
-    private shouldSuppressProcessorError(error: unknown, messageId: string): boolean {
-        if (!(error instanceof Error)) {
-            return false;
-        }
-
-        // Unknown events are intentionally ignored when ignoreUnknownEvents is enabled.
-        if (error.name === 'UnknownEventDiscardError') {
-            log('debug', `[Consumer] Ignored unknown event ${messageId} without retry`);
-            return true;
-        }
-
-        // Max-retry guard should never be treated as a processing failure.
-        const msg = error.message?.toLowerCase?.() ?? '';
-        if (msg.includes('max retry attempts') && msg.includes('exceeded')) {
-            log('debug', `[Consumer] Max retries exceeded for ${messageId} handled without retry requeue`);
-            return true;
-        }
-
-        return false;
-    }
-
-    // ─── Validation ────────────────────────────────────────────────────────────
 
     private validateConfig(): void {
-        /* istanbul ignore next */
         if (!this.config.consumeQueue?.queue) {
             throw new Error('[Consumer] Configuration error: "consumeQueue.queue" is required');
         }
-        /* istanbul ignore next */
         if (!this.config.eventsToProcess?.length) {
             throw new Error('[Consumer] Configuration error: "eventsToProcess" must have at least one event handler');
+        }
+        if (this.config.prefetch !== undefined && (!Number.isInteger(this.config.prefetch) || this.config.prefetch < 0)) {
+            throw new Error('[Consumer] Configuration error: "prefetch" must be a non-negative integer');
+        }
+        if (this.config.retryQueue?.maxAttempts !== undefined
+            && (!Number.isInteger(this.config.retryQueue.maxAttempts) || this.config.retryQueue.maxAttempts <= 0)) {
+            throw new Error('[Consumer] Configuration error: "retryQueue.maxAttempts" must be a positive integer');
+        }
+        if (this.config.retryQueue?.ttlMs !== undefined
+            && (!Number.isInteger(this.config.retryQueue.ttlMs) || this.config.retryQueue.ttlMs < 0)) {
+            throw new Error('[Consumer] Configuration error: "retryQueue.ttlMs" must be a non-negative integer');
+        }
+        this.assertPositiveInteger('storeConnectionRetries', this.config.storeConnectionRetries);
+        this.assertNonNegativeInteger('storeConnectionRetryDelayMs', this.config.storeConnectionRetryDelayMs);
+        this.assertPositiveFinite('reconnectDelayMs', this.config.reconnectDelayMs);
+        this.assertPositiveFinite('reconnectMaxDelayMs', this.config.reconnectMaxDelayMs);
+        this.assertPositiveFinite('shutdownTimeoutMs', this.config.shutdownTimeoutMs);
+        if ((this.config.reconnectMaxDelayMs ?? 30000) < (this.config.reconnectDelayMs ?? 250)) {
+            throw new Error('[Consumer] Configuration error: "reconnectMaxDelayMs" must not be less than "reconnectDelayMs"');
+        }
+        const processingTimeout = this.config.processingTimeoutMs ?? 300000;
+        const lease = this.config.processingLeaseMs ?? 330000;
+        if (!Number.isFinite(processingTimeout) || !Number.isFinite(lease)
+            || processingTimeout <= 0 || lease <= processingTimeout) {
+            throw new Error('[Consumer] Configuration error: "processingLeaseMs" must exceed "processingTimeoutMs"');
+        }
+        const store = this.config.store;
+        if (store && (!store.claimConsumeEvent || !store.transitionConsumeEvent)) {
+            throw new Error('[Consumer] Configuration error: store requires atomic claimConsumeEvent() and transitionConsumeEvent()');
+        }
+    }
+
+    private assertPositiveInteger(name: string, value: number | undefined): void {
+        if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+            throw new Error(`[Consumer] Configuration error: "${name}" must be a positive integer`);
+        }
+    }
+
+    private assertNonNegativeInteger(name: string, value: number | undefined): void {
+        if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+            throw new Error(`[Consumer] Configuration error: "${name}" must be a non-negative integer`);
+        }
+    }
+
+    private assertPositiveFinite(name: string, value: number | undefined): void {
+        if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
+            throw new Error(`[Consumer] Configuration error: "${name}" must be positive and finite`);
         }
     }
 }

@@ -1,15 +1,9 @@
+export * from './types';
 export * from './logger/logger';
-
-// Broker implementation (AMQP)
 export * from './broker/amqp-queue';
-
-// Resilience layer (consumption and publishing)
 export * from './resilience/resilient-consumer';
 export * from './resilience/resilient-event-consume-processor';
 export * from './resilience/resilient-event-publisher';
 export * from './resilience/middleware';
-export * from './resilience/dlq-handler';
-
-// Metrics
+export * from './resilience/ignored-event-error';
 export * from './metrics/metrics-collector';
-

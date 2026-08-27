@@ -9,6 +9,7 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig.json'
+      - '.github/workflows/ci-cd.yml'
   pull_request:
     branches: [main, master, develop]
     paths:
@@ -17,31 +18,31 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'tsconfig.json'
+      - '.github/workflows/ci-cd.yml'
 
 env:
   NODE_VERSION: '24'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ─── Unit Tests ──────────────────────────────────────────────────────────────
   unit-tests:
     name: Unit Tests (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       matrix:
-        node-version: [18, 20, 22, 24, 25]
+        node-version: [18, 20, 22, 24, 26]
       fail-fast: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .jest-cache/unit
           key: jest-unit-${{ runner.os }}-node${{ matrix.node-version }}-${{ hashFiles('package-lock.json') }}
@@ -53,7 +54,7 @@ jobs:
         run: npm run test:coverage
 
       - name: Upload coverage (Node 20 only)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always() && matrix.node-version == 20
         with:
           name: coverage-report
@@ -61,26 +62,25 @@ jobs:
           retention-days: 30
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: unit-results-node${{ matrix.node-version }}
           path: test-results/junit-unit.xml
           retention-days: 14
 
-  # ─── Integration Tests ───────────────────────────────────────────────────────
   integration-tests:
     name: Integration Tests (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       matrix:
-        node-version: [18, 20, 22, 24, 25]
+        node-version: [18, 20, 22, 24, 26]
       fail-fast: false
 
     services:
       rabbitmq:
-        image: rabbitmq:3.12-management-alpine
+        image: rabbitmq:4.3.5-management-alpine
         ports:
           - 5672:5672
           - 15672:15672
@@ -95,14 +95,14 @@ jobs:
           --health-start-period 60s
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .jest-cache/integration
           key: jest-integration-${{ runner.os }}-node${{ matrix.node-version }}-${{ hashFiles('package-lock.json') }}
@@ -127,14 +127,13 @@ jobs:
           RABBITMQ_URL: amqp://guest:guest@localhost:5672
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: integration-results-node${{ matrix.node-version }}
           path: test-results/junit-integration.xml
           retention-days: 14
 
-  # ─── Stress Tests ────────────────────────────────────────────────────────────
   stress-tests:
     name: Stress Tests
     runs-on: ubuntu-latest
@@ -142,7 +141,7 @@ jobs:
 
     services:
       rabbitmq:
-        image: rabbitmq:3.12-management-alpine
+        image: rabbitmq:4.3.5-management-alpine
         ports:
           - 5672:5672
           - 15672:15672
@@ -157,9 +156,9 @@ jobs:
           --health-start-period 60s
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -200,14 +199,13 @@ jobs:
           fi
 
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: stress-results
           path: test-results/stress-*.json
           retention-days: 30
 
-  # ─── Benchmarks ──────────────────────────────────────────────────────────────
   benchmarks:
     name: Performance Benchmarks
     runs-on: ubuntu-latest
@@ -215,7 +213,7 @@ jobs:
 
     services:
       rabbitmq:
-        image: rabbitmq:3.12-management-alpine
+        image: rabbitmq:4.3.5-management-alpine
         ports:
           - 5672:5672
           - 15672:15672
@@ -230,11 +228,11 @@ jobs:
           --health-start-period 60s
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -290,23 +288,22 @@ jobs:
           fi
 
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: benchmark-results
           path: test-results/benchmark-*.json
           retention-days: 90
 
-  # ─── Build ───────────────────────────────────────────────────────────────────
   build:
     name: Build
     runs-on: ubuntu-latest
     needs: [unit-tests, integration-tests, stress-tests, benchmarks]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -322,7 +319,7 @@ jobs:
           echo "✅ Build OK"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-artifacts
           path: |
@@ -332,7 +329,6 @@ jobs:
             README.md
           retention-days: 7
 
-  # ─── Publish ─────────────────────────────────────────────────────────────────
   publish:
     name: Publish to NPM
     runs-on: ubuntu-latest
@@ -342,19 +338,18 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: 'https://registry.npmjs.org/'
           cache: 'npm'
 
-      # 🔥 PASO AÑADIDO: Descargar los compilados del job "build"
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build-artifacts
 
@@ -404,7 +399,6 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  # ─── Summary ─────────────────────────────────────────────────────────────────
   summary:
     name: CI/CD Summary
     runs-on: ubuntu-latest
@@ -412,14 +406,14 @@ jobs:
     if: always()
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts/
         continue-on-error: true
@@ -433,7 +427,6 @@ jobs:
           const out = [];
           const push = (s = '') => out.push(s);
 
-          // ── helpers ──────────────────────────────────────────────────────────
           function jobIcon(result) {
             return result === 'success' ? '✅' : result === 'skipped' ? '⏭️' : result === 'failure' ? '❌' : '⚠️';
           }
@@ -457,7 +450,6 @@ jobs:
             return fs.existsSync(p) ? p : null;
           }
 
-          // ── Pipeline status ───────────────────────────────────────────────────
           push('# 🚀 CI/CD Pipeline Summary');
           push('');
           push('| Job | Result |');
@@ -476,10 +468,9 @@ jobs:
           push('');
           push(`> **Branch:** \`${{ github.ref_name }}\` &nbsp;|&nbsp; **Commit:** \`${{ github.sha }}\` &nbsp;|&nbsp; **Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`);
 
-          // ── Unit Tests detail ─────────────────────────────────────────────────
           push('');
           push('## 🧪 Unit Tests');
-          const nodeVersions = [18, 20, 22, 24, 25];
+          const nodeVersions = [18, 20, 22, 24, 26];
           let unitTotals = { tests: 0, failures: 0, errors: 0, time: 0, nodes: 0 };
           const unitRows = [];
           for (const v of nodeVersions) {
@@ -513,7 +504,6 @@ jobs:
             push(`**Totals across all nodes:** ${unitTotals.tests - unitTotals.failures} passed, ${unitTotals.failures} failed, ${unitTotals.tests} total — ${unitTotals.time.toFixed(2)}s`);
           }
 
-          // ── Integration Tests detail ──────────────────────────────────────────
           push('');
           push('## 🔗 Integration Tests');
           const intRows = [];
@@ -549,7 +539,6 @@ jobs:
             push(`**Totals across all nodes:** ${intTotals.tests - intTotals.failures} passed, ${intTotals.failures} failed, ${intTotals.tests} total — ${intTotals.time.toFixed(2)}s`);
           }
 
-          // ── Stress Tests detail ───────────────────────────────────────────────
           push('');
           push('## 💪 Stress Tests');
           const stressDir = artifactDir('stress-results');
@@ -575,7 +564,6 @@ jobs:
             push('_No stress results artifact._');
           }
 
-          // ── Benchmarks detail ─────────────────────────────────────────────────
           push('');
           push('## ⚡ Performance Benchmarks');
           const benchDir = artifactDir('benchmark-results');
@@ -603,7 +591,6 @@ jobs:
             push('_No benchmark results artifact._');
           }
 
-          // ── Coverage ──────────────────────────────────────────────────────────
           push('');
           push('## 📊 Coverage (Node 20)');
           const covFile = path.join('artifacts', 'coverage-report', 'coverage-summary.json');
@@ -618,7 +605,6 @@ jobs:
                 const bar = '█'.repeat(Math.round((m.pct||0)/10)) + '░'.repeat(10 - Math.round((m.pct||0)/10));
                 push(`| ${k.charAt(0).toUpperCase()+k.slice(1)} | ${bar} ${m.pct}% | ${m.covered} | ${m.total} |`);
               }
-              // Per-file breakdown (top 10 lowest coverage)
               const files = Object.entries(cov)
                 .filter(([k]) => k !== 'total')
                 .map(([k, v]) => ({ file: k.replace(process.cwd()+'/', ''), pct: v.lines?.pct ?? 0 }))

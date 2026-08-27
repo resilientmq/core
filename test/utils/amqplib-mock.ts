@@ -94,6 +94,11 @@ export class MockConnection {
         return channel;
     }
 
+    /** Creates a channel that acknowledges every publication by default. */
+    async createConfirmChannel(): Promise<MockChannel> {
+        return this.createChannel();
+    }
+
     async close(): Promise<void> {
         this.closed = true;
         for (const channel of this.channels) {
@@ -148,11 +153,17 @@ export class MockConnection {
  */
 export class MockChannel {
     private queues: Map<string, MockQueue> = new Map();
+    private queueOptions: Map<string, Options.AssertQueue | undefined> = new Map();
     private exchanges: Map<string, MockExchange> = new Map();
     private bindings: Map<string, Set<string>> = new Map(); // queue -> set of exchange:routingKey
     private consumers: Map<string, Function> = new Map();
     private eventHandlers: Map<string, Function[]> = new Map();
     private closed: boolean = false;
+    private autoConfirm = true;
+    private nextConfirmError?: Error;
+    private returnNext = false;
+    private backpressureNext = false;
+    private pendingConfirms: Array<(error: unknown, ok?: unknown) => void> = [];
 
     async assertQueue(queue: string, options?: Options.AssertQueue): Promise<any> {
         if (this.closed) {
@@ -162,6 +173,7 @@ export class MockChannel {
         if (!this.queues.has(queue)) {
             this.queues.set(queue, new MockQueue());
         }
+        this.queueOptions.set(queue, options);
 
         return {
             queue,
@@ -213,7 +225,13 @@ export class MockChannel {
         return {};
     }
 
-    publish(exchange: string, routingKey: string, content: Buffer, options?: Options.Publish): boolean {
+    publish(
+        exchange: string,
+        routingKey: string,
+        content: Buffer,
+        options?: Options.Publish,
+        callback?: (error: unknown, ok?: unknown) => void
+    ): boolean {
         if (this.closed) {
             throw new Error('Channel is closed');
         }
@@ -230,10 +248,16 @@ export class MockChannel {
             }
         }
 
-        return true;
+        this.completePublication(message, callback);
+        return this.takeWritableState();
     }
 
-    sendToQueue(queue: string, content: Buffer, options?: Options.Publish): boolean {
+    sendToQueue(
+        queue: string,
+        content: Buffer,
+        options?: Options.Publish,
+        callback?: (error: unknown, ok?: unknown) => void
+    ): boolean {
         if (this.closed) {
             throw new Error('Channel is closed');
         }
@@ -252,7 +276,8 @@ export class MockChannel {
             setImmediate(() => consumer(message));
         }
 
-        return true;
+        this.completePublication(message, callback);
+        return this.takeWritableState();
     }
 
     async consume(queue: string, onMessage: (msg: ConsumeMessage | null) => void, options?: Options.Consume): Promise<any> {
@@ -311,6 +336,21 @@ export class MockChannel {
         return this;
     }
 
+    once(event: string, handler: Function): this {
+        const wrapper = (...args: any[]) => {
+            const handlers = this.eventHandlers.get(event) || [];
+            this.eventHandlers.set(event, handlers.filter(candidate => candidate !== wrapper));
+            handler(...args);
+        };
+        return this.on(event, wrapper);
+    }
+
+    removeListener(event: string, handler: Function): this {
+        const handlers = this.eventHandlers.get(event) || [];
+        this.eventHandlers.set(event, handlers.filter(candidate => candidate !== handler));
+        return this;
+    }
+
     emit(event: string, ...args: any[]): void {
         const handlers = this.eventHandlers.get(event) || [];
         for (const handler of handlers) {
@@ -340,6 +380,43 @@ export class MockChannel {
         }
     }
 
+    simulateIncomingRaw(queue: string, content: Buffer, properties?: any): void {
+        const message = this.createMessage(content, properties);
+        if (!this.queues.has(queue)) this.assertQueue(queue);
+        this.queues.get(queue)!.addMessage(message);
+        const consumer = this.consumers.get(queue);
+        if (consumer) setImmediate(() => consumer(message));
+    }
+
+    setAutoConfirm(enabled: boolean): void {
+        this.autoConfirm = enabled;
+    }
+
+    confirmPending(error?: Error): void {
+        const callbacks = this.pendingConfirms.splice(0, this.pendingConfirms.length);
+        for (const callback of callbacks) callback(error ?? null, {});
+    }
+
+    failNextConfirm(error = new Error('Publisher confirm failed (simulated)')): void {
+        this.nextConfirmError = error;
+    }
+
+    returnNextPublication(): void {
+        this.returnNext = true;
+    }
+
+    applyBackpressureNext(): void {
+        this.backpressureNext = true;
+    }
+
+    getQueueOptions(queue: string): Options.AssertQueue | undefined {
+        return this.queueOptions.get(queue);
+    }
+
+    getBindings(queue: string): string[] {
+        return Array.from(this.bindings.get(queue) ?? []);
+    }
+
     private createMessage(content: Buffer, options?: any): ConsumeMessage {
         const f = options?.fields;
         return {
@@ -355,7 +432,7 @@ export class MockChannel {
                 contentType: options?.contentType,
                 contentEncoding: options?.contentEncoding,
                 headers: options?.headers || {},
-                deliveryMode: options?.persistent ? 2 : 1,
+                deliveryMode: options?.deliveryMode ?? (options?.persistent ? 2 : 1),
                 priority: options?.priority,
                 correlationId: options?.correlationId,
                 replyTo: options?.replyTo,
@@ -368,6 +445,28 @@ export class MockChannel {
                 clusterId: ''
             }
         };
+    }
+
+    private completePublication(
+        message: ConsumeMessage,
+        callback?: (error: unknown, ok?: unknown) => void
+    ): void {
+        if (this.returnNext) {
+            this.returnNext = false;
+            this.emit('return', message);
+        }
+        if (!callback) return;
+        const error = this.nextConfirmError;
+        this.nextConfirmError = undefined;
+        if (this.autoConfirm) callback(error ?? null, {});
+        else this.pendingConfirms.push(callback);
+    }
+
+    private takeWritableState(): boolean {
+        if (!this.backpressureNext) return true;
+        this.backpressureNext = false;
+        setImmediate(() => this.emit('drain'));
+        return false;
     }
 
     private matchesRoutingKey(messageKey: string, bindingKey: string): boolean {

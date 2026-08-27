@@ -16,7 +16,7 @@ export type EventProperties = {
     /**
      * Custom headers to include with the message.
      */
-    headers?: Record<string, any>;
+    headers?: Record<string, unknown>;
 
     /**
      * Whether the message is persistent (2) or transient (1).
@@ -74,7 +74,7 @@ export type EventProperties = {
  *
  * @typeParam T - The shape of the payload associated with the event.
  */
-export type EventMessage<T = any> = {
+export type EventMessage<T = unknown> = {
 
     /**
      * The message ID used in AMQP (optional, but helpful for tracing).

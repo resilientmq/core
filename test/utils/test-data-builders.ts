@@ -192,24 +192,8 @@ export class ConsumerConfigBuilder {
         return this;
     }
 
-    withMaxUptimeMs(maxUptimeMs: number): ConsumerConfigBuilder {
-        this.config.maxUptimeMs = maxUptimeMs;
-        return this;
-    }
-
     withReconnectDelayMs(reconnectDelayMs: number): ConsumerConfigBuilder {
         this.config.reconnectDelayMs = reconnectDelayMs;
-        return this;
-    }
-
-    withExitIfIdle(exitIfIdle: boolean, idleCheckIntervalMs?: number, maxIdleChecks?: number): ConsumerConfigBuilder {
-        this.config.exitIfIdle = exitIfIdle;
-        if (idleCheckIntervalMs !== undefined) {
-            this.config.idleCheckIntervalMs = idleCheckIntervalMs;
-        }
-        if (maxIdleChecks !== undefined) {
-            this.config.maxIdleChecks = maxIdleChecks;
-        }
         return this;
     }
 
@@ -277,14 +261,6 @@ export class PublisherConfigBuilder {
 
     withPendingEventsCheckInterval(intervalMs: number): PublisherConfigBuilder {
         this.config.pendingEventsCheckIntervalMs = intervalMs;
-        return this;
-    }
-
-    withStoreConnectionRetries(retries: number, delayMs?: number): PublisherConfigBuilder {
-        this.config.storeConnectionRetries = retries;
-        if (delayMs !== undefined) {
-            this.config.storeConnectionRetryDelayMs = delayMs;
-        }
         return this;
     }
 

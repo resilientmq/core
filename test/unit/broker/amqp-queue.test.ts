@@ -1,489 +1,143 @@
-import { AmqpQueue } from '../../../src/broker/amqp-queue';
-import { AMQPLibMock } from '../../utils/amqplib-mock';
-import { EventConsumeStatus } from '../../../src/types';
+import {AmqpQueue} from '../../../src/broker/amqp-queue';
+import {AMQPLibMock, MockChannel} from '../../utils/amqplib-mock';
 
-// Mock amqplib module
-jest.mock('amqplib', () => {
-    const mockLib = new (require('../../utils/amqplib-mock').AMQPLibMock)();
-    return {
-        connect: jest.fn((...args) => mockLib.connect(...args))
-    };
-});
+jest.mock('amqplib', () => ({connect: jest.fn()}));
 
-describe('AmqpQueue', () => {
-    let amqpQueue: AmqpQueue;
-    let mockLib: AMQPLibMock;
+describe('AmqpQueue confirmed transport', () => {
+    let library: AMQPLibMock;
+    let queue: AmqpQueue;
 
-    beforeEach(async () => {
-        jest.useFakeTimers();
-        // Reset mock
-        mockLib = new AMQPLibMock();
-        const amqplib = require('amqplib');
-        amqplib.connect.mockImplementation((url: any) => mockLib.connect(url));
-
-        // Create queue instance
-        amqpQueue = new AmqpQueue('amqp://localhost:5672');
+    beforeEach(() => {
+        library = new AMQPLibMock();
+        require('amqplib').connect.mockImplementation((config: unknown) => library.connect(config as string));
+        queue = new AmqpQueue('amqp://localhost');
     });
 
     afterEach(async () => {
-        mockLib.reset();
+        if (!queue.closed) await queue.forceClose();
         jest.clearAllMocks();
-        jest.useRealTimers();
     });
 
-    describe('connect', () => {
-        it('should connect to AMQP broker successfully', async () => {
-            await amqpQueue.connect(10);
-
-            expect(amqpQueue.connection).toBeDefined();
-            expect(amqpQueue.channel).toBeDefined();
-            expect(amqpQueue.prefetchCount).toBe(10);
-        });
-
-        it('should use default prefetch of 1 when not specified', async () => {
-            await amqpQueue.connect();
-
-            expect(amqpQueue.prefetchCount).toBe(1);
-        });
-
-        it('should throw error when connection fails', async () => {
-            mockLib.setConnectionFailure(true);
-
-            await expect(amqpQueue.connect()).rejects.toThrow('Connection failed (simulated)');
-        });
-
-        it('should throw error when channel creation fails', async () => {
-            mockLib.setChannelFailure(true);
-
-            await expect(amqpQueue.connect()).rejects.toThrow('Channel creation failed (simulated)');
-        });
-
-        it('should set closed flag when connection closes', async () => {
-            await amqpQueue.connect();
-
-            expect(amqpQueue.closed).toBe(false);
-
-            // Simulate connection close
-            await amqpQueue.connection.close();
-
-            expect(amqpQueue.closed).toBe(true);
-        });
-
-        it('should handle connection and channel error events', async () => {
-            await amqpQueue.connect();
-
-            // Simulate firing connection error
-            amqpQueue.connection.emit('error', new Error('test conn error'));
-            expect(amqpQueue.closed).toBe(true);
-
-            // Simulate firing channel error
-            amqpQueue.channel.emit('error', new Error('test channel error'));
-            // Just verifying it doesn't throw unhandled
-        });
+    it('creates a confirm channel and applies the requested prefetch', async () => {
+        await queue.connect(1000);
+        expect(queue.prefetchCount).toBe(1000);
+        expect(queue.channel).toBeDefined();
+        expect(queue.closed).toBe(false);
     });
 
-    describe('publish', () => {
-        beforeEach(async () => {
-            await amqpQueue.connect();
-        });
-
-        it('should publish message to queue directly', async () => {
-            const event = {
-                messageId: 'msg-001',
-                type: 'test.event',
-                payload: { data: 'test' },
-                status: EventConsumeStatus.RECEIVED
-            };
-
-            await amqpQueue.publish('test.queue', event);
-
-            const messages = mockLib.getPublishedMessages('test.queue');
-            expect(messages).toHaveLength(1);
-            expect(JSON.parse(messages[0].content.toString())).toEqual({ data: 'test' });
-        });
-
-        it('should publish message to exchange with routing key', async () => {
-            const event = {
-                messageId: 'msg-002',
-                type: 'test.event',
-                payload: { data: 'test' },
-                status: EventConsumeStatus.RECEIVED,
-                routingKey: 'test.routing.key'
-            };
-
-            await amqpQueue.publish('test.queue', event, {
-                exchange: {
-                    name: 'test.exchange',
-                    type: 'topic',
-                    options: { durable: true }
-                }
-            });
-
-            // Message should be published to exchange, not directly to queue
-            const messages = mockLib.getPublishedMessages('test.queue');
-            expect(messages).toHaveLength(0);
-        });
-
-        it('should use empty routing key when not provided', async () => {
-            const event = {
-                messageId: 'msg-003',
-                type: 'test.event',
-                payload: { data: 'test' },
-                status: EventConsumeStatus.RECEIVED
-            };
-
-            await amqpQueue.publish('test.queue', event, {
-                exchange: {
-                    name: 'test.exchange',
-                    type: 'fanout',
-                    options: { durable: true }
-                }
-            });
-
-            // Should not throw error
-            expect(true).toBe(true);
-        });
-
-        it('should use persistent delivery mode by default', async () => {
-            const event = {
-                messageId: 'msg-004',
-                type: 'test.event',
-                payload: { data: 'test' },
-                status: EventConsumeStatus.RECEIVED
-            };
-
-            await amqpQueue.publish('test.queue', event);
-
-            const messages = mockLib.getPublishedMessages('test.queue');
-            expect(messages[0].properties.deliveryMode).toBe(2);
-        });
-
-        it('should use custom properties when provided', async () => {
-            const event = {
-                messageId: 'msg-005',
-                type: 'test.event',
-                payload: { data: 'test' },
-                status: EventConsumeStatus.RECEIVED,
-                properties: {
-                    persistent: false,
-                    contentType: 'application/json',
-                    correlationId: 'corr-123'
-                }
-            };
-
-            await amqpQueue.publish('test.queue', event);
-
-            const messages = mockLib.getPublishedMessages('test.queue');
-            expect(messages[0].properties.contentType).toBe('application/json');
-            expect(messages[0].properties.correlationId).toBe('corr-123');
-        });
+    it('adds an AMQP heartbeat when the URI omits one', async () => {
+        await queue.connect();
+        expect(require('amqplib').connect).toHaveBeenCalledWith(expect.stringContaining('heartbeat=10'));
     });
 
-    describe('consume', () => {
-        beforeEach(async () => {
-            await amqpQueue.connect();
-        });
-
-        it('should consume messages from queue', async () => {
-            const receivedMessages: any[] = [];
-            const onMessage = jest.fn(async (event) => {
-                receivedMessages.push(event);
-            });
-
-            await amqpQueue.consume('test.queue', onMessage);
-
-            // Simulate incoming message
-            (amqpQueue.channel as any).simulateIncomingMessage('test.queue', { data: 'test' }, {
-                messageId: 'msg-001',
-                type: 'test.event'
-            });
-
-            // Run all pending timers and wait for promises
-            jest.runAllTimers();
-            await Promise.resolve();
-
-            expect(onMessage).toHaveBeenCalled();
-            expect(receivedMessages).toHaveLength(1);
-            expect(receivedMessages[0].payload).toEqual({ data: 'test' });
-        });
-
-        it('should ack message after successful processing', async () => {
-            jest.useRealTimers(); // Use real timers for this test
-            const ackSpy = jest.spyOn(amqpQueue.channel, 'ack');
-
-            // Mock the connection stream to be writable
-            (amqpQueue.channel as any).connection = {
-                stream: { writable: true }
-            };
-
-            await amqpQueue.consume('test.queue', async () => {
-                // Successful processing
-            });
-
-            (amqpQueue.channel as any).simulateIncomingMessage('test.queue', { data: 'test' });
-
-            // Wait for async processing
-            await new Promise(resolve => setTimeout(resolve, 50));
-
-            expect(ackSpy).toHaveBeenCalled();
-            jest.useFakeTimers(); // Restore fake timers
-        });
-
-        it('should handle exception during nack gracefully', async () => {
-            jest.useRealTimers();
-            // Wrap the stream to be writable, but make nack throw
-            (amqpQueue.channel as any).connection = {
-                stream: { writable: true }
-            };
-            const nackSpy = jest.spyOn(amqpQueue.channel, 'nack').mockImplementation(() => {
-                throw new Error('Nack error');
-            });
-
-            await amqpQueue.consume('test.queue', async () => {
-                throw new Error('Processing failed');
-            });
-
-            (amqpQueue.channel as any).simulateIncomingMessage('test.queue', { data: 'test' });
-            await new Promise(resolve => setTimeout(resolve, 50));
-
-            expect(nackSpy).toHaveBeenCalled();
-            jest.useFakeTimers();
-        });
-
-        it('should not nack if channel stream is not writable', async () => {
-            jest.useRealTimers();
-            (amqpQueue.channel as any).connection = {
-                stream: { writable: false } // Trigger line 167
-            };
-            const nackSpy = jest.spyOn(amqpQueue.channel, 'nack');
-
-            await amqpQueue.consume('test.queue', async () => {
-                throw new Error('Processing failed');
-            });
-
-            (amqpQueue.channel as any).simulateIncomingMessage('test.queue', { data: 'test' });
-            await new Promise(resolve => setTimeout(resolve, 50));
-
-            expect(nackSpy).not.toHaveBeenCalled();
-            jest.useFakeTimers();
-        });
-
-        it('should parse message payload correctly', async () => {
-            let receivedPayload: any;
-
-            await amqpQueue.consume('test.queue', async (event) => {
-                receivedPayload = event.payload;
-            });
-
-            (amqpQueue.channel as any).simulateIncomingMessage('test.queue', {
-                userId: '123',
-                action: 'created'
-            });
-
-            jest.runAllTimers();
-            await Promise.resolve();
-
-            expect(receivedPayload).toEqual({ userId: '123', action: 'created' });
-        });
-
-        it('should handle multiple consumers on different queues', async () => {
-            const queue1Messages: any[] = [];
-            const queue2Messages: any[] = [];
-
-            await amqpQueue.consume('queue1', async (event) => {
-                queue1Messages.push(event);
-            });
-
-            await amqpQueue.consume('queue2', async (event) => {
-                queue2Messages.push(event);
-            });
-
-            (amqpQueue.channel as any).simulateIncomingMessage('queue1', { data: 'q1' });
-            (amqpQueue.channel as any).simulateIncomingMessage('queue2', { data: 'q2' });
-
-            jest.runAllTimers();
-            await Promise.resolve();
-
-            expect(queue1Messages).toHaveLength(1);
-            expect(queue2Messages).toHaveLength(1);
-            expect(queue1Messages[0].payload).toEqual({ data: 'q1' });
-            expect(queue2Messages[0].payload).toEqual({ data: 'q2' });
-        });
-
-        it('should pass routingKey from message fields to onMessage', async () => {
-            let received: any;
-            await amqpQueue.consume('test.queue', async (event) => {
-                received = event;
-            });
-
-            (amqpQueue.channel as any).simulateIncomingMessage(
-                'test.queue',
-                { data: 'x' },
-                {
-                    messageId: 'id-1',
-                    type: 't',
-                    fields: { routingKey: 'orders.created' }
-                }
-            );
-
-            jest.runAllTimers();
-            await Promise.resolve();
-
-            expect(received.routingKey).toBe('orders.created');
-        });
-
-        it('should set routingKey to undefined when absent', async () => {
-            let received: any;
-            await amqpQueue.consume('test.queue', async (event) => {
-                received = event;
-            });
-
-            (amqpQueue.channel as any).simulateIncomingMessage('test.queue', { data: 'x' }, {
-                messageId: 'id-3',
-                type: 't'
-            });
-
-            jest.runAllTimers();
-            await Promise.resolve();
-
-            expect(received.routingKey).toBeUndefined();
-        });
+    it('rejects invalid prefetch before opening a connection', async () => {
+        await expect(queue.connect(-1)).rejects.toThrow('Prefetch');
+        expect(require('amqplib').connect).not.toHaveBeenCalled();
     });
 
-    describe('disconnect', () => {
-        it('should cancel all consumers before disconnecting', async () => {
-            await amqpQueue.connect();
-            await amqpQueue.consume('test.queue', async () => { });
-
-            const cancelSpy = jest.spyOn(amqpQueue.channel, 'cancel');
-
-            await amqpQueue.disconnect();
-
-            expect(cancelSpy).toHaveBeenCalled();
-        });
-
-        it('should wait for processing messages to complete', async () => {
-            jest.useRealTimers(); // Use real timers for this test
-            await amqpQueue.connect();
-
-            let processingStarted = false;
-            let processingComplete = false;
-
-            await amqpQueue.consume('test.queue', async () => {
-                processingStarted = true;
-                await new Promise(resolve => setTimeout(resolve, 50));
-                processingComplete = true;
-            });
-
-            (amqpQueue.channel as any).simulateIncomingMessage('test.queue', { data: 'test' });
-
-            // Give time for message to start processing
-            await new Promise(resolve => setTimeout(resolve, 10));
-
-            // Verify processing started
-            expect(processingStarted).toBe(true);
-
-            // Start disconnect - it should wait
-            await amqpQueue.disconnect();
-
-            // Processing should be complete after disconnect
-            expect(processingComplete).toBe(true);
-            jest.useFakeTimers(); // Restore fake timers
-        });
-
-        it('should close channel and connection', async () => {
-            await amqpQueue.connect();
-
-            const channelCloseSpy = jest.spyOn(amqpQueue.channel, 'close');
-            const connectionCloseSpy = jest.spyOn(amqpQueue.connection, 'close');
-
-            await amqpQueue.disconnect();
-
-            expect(channelCloseSpy).toHaveBeenCalled();
-            expect(connectionCloseSpy).toHaveBeenCalled();
-        });
+    it('does not resolve a publication before its broker confirm', async () => {
+        await queue.connect();
+        const channel = queue.channel as unknown as MockChannel;
+        channel.setAutoConfirm(false);
+        let resolved = false;
+        const publication = queue.publish('orders', {messageId: '1', payload: {ok: true}})
+            .then(() => { resolved = true; });
+        await Promise.resolve();
+        expect(resolved).toBe(false);
+        channel.confirmPending();
+        await publication;
+        expect(resolved).toBe(true);
     });
 
-    describe('close', () => {
-        it('should be an alias for disconnect', async () => {
-            await amqpQueue.connect();
-
-            const disconnectSpy = jest.spyOn(amqpQueue, 'disconnect');
-
-            await amqpQueue.close();
-
-            expect(disconnectSpy).toHaveBeenCalled();
-        });
+    it('rejects a negative publisher confirm', async () => {
+        await queue.connect();
+        (queue.channel as unknown as MockChannel).failNextConfirm();
+        await expect(queue.publish('orders', {messageId: '2', payload: {}})).rejects.toThrow('confirm failed');
     });
 
-    describe('getters', () => {
-        it('should expose connection getter', async () => {
-            await amqpQueue.connect();
-            const conn = amqpQueue.connection;
-            expect(conn).toBeDefined();
-        });
-
-        it('should expose channel getter', async () => {
-            await amqpQueue.connect();
-            const ch = amqpQueue.channel;
-            expect(ch).toBeDefined();
-        });
-
-        it('should expose prefetchCount getter', async () => {
-            await amqpQueue.connect(5);
-            expect(amqpQueue.prefetchCount).toBe(5);
-        });
+    it('rejects a mandatory publication returned as unroutable', async () => {
+        await queue.connect();
+        (queue.channel as unknown as MockChannel).returnNextPublication();
+        await expect(queue.publish('missing', {messageId: '3', payload: {}})).rejects.toThrow('unroutable');
     });
 
-    describe('disconnect edge cases', () => {
-        it('should handle cancel error', async () => {
-            await amqpQueue.connect();
-            await amqpQueue.consume('test.queue', async () => { });
-            jest.spyOn(amqpQueue.channel, 'cancel').mockRejectedValue(new Error('Cancel error'));
-            await expect(amqpQueue.disconnect()).resolves.not.toThrow();
-        });
-
-        it('should do nothing if already closed', async () => {
-            await amqpQueue.connect();
-            amqpQueue.closed = true;
-            await amqpQueue.disconnect();
-            const cancelSpy = jest.spyOn(amqpQueue.channel, 'cancel');
-            expect(cancelSpy).not.toHaveBeenCalled();
-        });
-
-        it('should handle channel close error', async () => {
-            await amqpQueue.connect();
-            jest.spyOn(amqpQueue.channel, 'close').mockRejectedValue(new Error('Channel error'));
-            await expect(amqpQueue.disconnect()).resolves.not.toThrow();
-        });
-
-        it('should handle connection close error', async () => {
-            await amqpQueue.connect();
-            jest.spyOn(amqpQueue.connection, 'close').mockRejectedValue(new Error('Connection error'));
-            await expect(amqpQueue.disconnect()).resolves.not.toThrow();
-        });
+    it('waits for channel drain when RabbitMQ applies backpressure', async () => {
+        await queue.connect();
+        (queue.channel as unknown as MockChannel).applyBackpressureNext();
+        await expect(queue.publish('orders', {messageId: '4', payload: {}})).resolves.toBeUndefined();
     });
 
-    describe('forceClose', () => {
-        it('should force close channel and connection immediately', async () => {
-            await amqpQueue.connect();
-            const channelCloseSpy = jest.spyOn(amqpQueue.channel, 'close');
-            const connectionCloseSpy = jest.spyOn(amqpQueue.connection, 'close');
+    it('blocks later writes behind one shared channel drain gate', async () => {
+        await queue.connect();
+        const channel = queue.channel as unknown as MockChannel;
+        const send = jest.spyOn(channel, 'sendToQueue');
+        channel.applyBackpressureNext();
+        const first = queue.publish('orders', {messageId: 'backpressure-1', payload: {}});
+        const second = queue.publish('orders', {messageId: 'backpressure-2', payload: {}});
+        await Promise.resolve();
+        expect(send).toHaveBeenCalledTimes(1);
+        await Promise.all([first, second]);
+        expect(send).toHaveBeenCalledTimes(2);
+    });
 
-            await amqpQueue.forceClose();
-
-            expect(amqpQueue.closed).toBe(true);
-            expect(channelCloseSpy).toHaveBeenCalled();
-            expect(connectionCloseSpy).toHaveBeenCalled();
+    it('preserves headers and adds publication correlation metadata', async () => {
+        await queue.connect();
+        await queue.publish('orders', {
+            messageId: '5',
+            type: 'order.created',
+            payload: {id: 5},
+            properties: {headers: {trace: 'abc'}}
         });
-
-        it('should swallow errors during force close', async () => {
-            await amqpQueue.connect();
-            jest.spyOn(amqpQueue.channel, 'close').mockRejectedValue(new Error('Channel error'));
-            jest.spyOn(amqpQueue.connection, 'close').mockRejectedValue(new Error('Connection error'));
-
-            await expect(amqpQueue.forceClose()).resolves.not.toThrow();
-            expect(amqpQueue.closed).toBe(true);
+        const [message] = library.getPublishedMessages('orders');
+        expect(message.properties.headers).toMatchObject({
+            trace: 'abc',
+            'x-message-id': '5',
+            'x-event-type': 'order.created'
         });
+        expect(message.properties.headers?.['x-resilientmq-publication-id']).toEqual(expect.any(String));
+        expect(message.properties.deliveryMode).toBe(2);
+    });
+
+    it('acknowledges a raw delivery only when the handler requests it', async () => {
+        await queue.connect();
+        const ack = jest.spyOn(queue.channel, 'ack');
+        await queue.consumeRaw('orders', async delivery => {
+            expect(JSON.parse(delivery.content.toString())).toEqual({id: 1});
+            return 'ack';
+        });
+        (queue.channel as unknown as MockChannel).simulateIncomingMessage('orders', {id: 1});
+        await new Promise(resolve => setImmediate(resolve));
+        expect(ack).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ['reject', false],
+        ['requeue', true]
+    ] as const)('maps %s to the expected nack requeue flag', async (disposition, requeue) => {
+        await queue.connect();
+        const nack = jest.spyOn(queue.channel, 'nack');
+        await queue.consumeRaw('orders', async () => disposition);
+        (queue.channel as unknown as MockChannel).simulateIncomingMessage('orders', {});
+        await new Promise(resolve => setImmediate(resolve));
+        expect(nack).toHaveBeenCalledWith(expect.anything(), false, requeue);
+    });
+
+    it('marks both channel and connection loss as unavailable', async () => {
+        await queue.connect();
+        const listener = jest.fn();
+        queue.onDisconnect(listener);
+        queue.channel.emit('error', new Error('channel failed'));
+        expect(queue.closed).toBe(true);
+        expect(listener).toHaveBeenCalledWith(expect.objectContaining({source: 'channel'}));
+    });
+
+    it('cancels consumers before closing the channel', async () => {
+        await queue.connect();
+        await queue.consumeRaw('orders', async () => 'ack');
+        const cancel = jest.spyOn(queue.channel, 'cancel');
+        const close = jest.spyOn(queue.channel, 'close');
+        await queue.disconnect();
+        expect(cancel).toHaveBeenCalled();
+        expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0]);
     });
 });

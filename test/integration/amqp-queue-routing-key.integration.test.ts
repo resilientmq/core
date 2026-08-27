@@ -28,8 +28,8 @@ describe('Integration: AmqpQueue routingKey', () => {
 
         const setupConn = await amqplib.connect(connectionUrl);
         const setupCh = await setupConn.createChannel();
-        await setupCh.assertExchange(exchangeName, 'topic', { durable: false });
-        await setupCh.assertQueue(queueName, { durable: false, autoDelete: true });
+        await setupCh.assertExchange(exchangeName, 'topic', { durable: true });
+        await setupCh.assertQueue(queueName, { durable: true, autoDelete: true });
         await setupCh.bindQueue(queueName, exchangeName, 'orders.*');
         await setupCh.close();
         await setupConn.close();
@@ -56,7 +56,7 @@ describe('Integration: AmqpQueue routingKey', () => {
             exchange: {
                 name: exchangeName,
                 type: 'topic',
-                options: { durable: false }
+                options: { durable: true }
             }
         });
 

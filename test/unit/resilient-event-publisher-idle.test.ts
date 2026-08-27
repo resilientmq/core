@@ -1,201 +1,72 @@
-import { ResilientEventPublisher } from '../../src/resilience/resilient-event-publisher';
-import { EventStoreMock } from '../utils/event-store-mock';
-import { createTestEvent } from '../fixtures/events';
-import { AmqpQueue } from '../../src/broker/amqp-queue';
+import {ResilientEventPublisher} from '../../src/resilience/resilient-event-publisher';
+import {AMQPLibMock} from '../utils/amqplib-mock';
 
-// Mock AmqpQueue
-jest.mock('../../src/broker/amqp-queue');
+jest.mock('amqplib', () => ({connect: jest.fn()}));
 
-describe('ResilientEventPublisher - Idle Connection Management', () => {
+describe('ResilientEventPublisher long-lived connections', () => {
+    let library: AMQPLibMock;
     let publisher: ResilientEventPublisher;
-    let store: EventStoreMock;
-    let mockQueue: jest.Mocked<AmqpQueue>;
 
     beforeEach(() => {
-        store = new EventStoreMock();
-        
-        // Setup mock queue
-        mockQueue = new AmqpQueue('amqp://localhost') as jest.Mocked<AmqpQueue>;
-        mockQueue.connect = jest.fn().mockResolvedValue(undefined);
-        mockQueue.disconnect = jest.fn().mockResolvedValue(undefined);
-        mockQueue.forceClose = jest.fn().mockResolvedValue(undefined);
-        mockQueue.publish = jest.fn().mockResolvedValue(undefined);
-        mockQueue.closed = false;
-
-        (AmqpQueue as jest.MockedClass<typeof AmqpQueue>).mockImplementation(() => mockQueue);
+        jest.useFakeTimers();
+        library = new AMQPLibMock();
+        require('amqplib').connect.mockImplementation((config: unknown) => library.connect(config as string));
     });
 
     afterEach(async () => {
-        if (publisher) {
-            publisher.stopPendingEventsCheck();
-            await publisher.disconnect();
-        }
-        store.clear();
+        if (publisher) await publisher.disconnect();
+        jest.useRealTimers();
         jest.clearAllMocks();
-        jest.clearAllTimers();
     });
 
-    it('should use default 10 second timeout when idleTimeoutMs is not configured', async () => {
-        jest.useFakeTimers();
-
+    it('keeps the confirm connection open without runtime idle timers', async () => {
         publisher = new ResilientEventPublisher({
             connection: 'amqp://localhost',
-            queue: 'test-queue',
-            store,
-            instantPublish: true
-            // idleTimeoutMs not set - should default to 10000ms
+            queue: 'orders'
         });
-
-        const event = createTestEvent({ test: 'data' });
-        await publisher.publish(event);
-
-        expect(mockQueue.connect).toHaveBeenCalledTimes(1);
+        await publisher.publish({messageId: 'one', payload: {}});
+        jest.advanceTimersByTime(60000);
         expect(publisher.isConnected()).toBe(true);
-
-        // Advance time but not past default timeout
-        jest.advanceTimersByTime(9000);
-        await Promise.resolve();
-
-        // Connection should still be open
-        expect(publisher.isConnected()).toBe(true);
-        expect(mockQueue.disconnect).not.toHaveBeenCalled();
-
-        // Advance past default timeout
-        jest.advanceTimersByTime(1100);
-        await Promise.resolve();
-
-        // Connection should be closed
-        expect(mockQueue.disconnect).toHaveBeenCalled();
     });
 
-    it('should close connection after idle timeout', async () => {
-        jest.useFakeTimers();
-
+    it('reuses one long-lived connection for concurrent confirms', async () => {
         publisher = new ResilientEventPublisher({
             connection: 'amqp://localhost',
-            queue: 'test-queue',
-            store,
-            instantPublish: true,
-            idleTimeoutMs: 1000 // 1 second
+            queue: 'orders',
+            maxConcurrentPublishes: 100
         });
-
-        const event = createTestEvent({ test: 'data' });
-        await publisher.publish(event);
-
-        expect(mockQueue.connect).toHaveBeenCalledTimes(1);
-        expect(publisher.isConnected()).toBe(true);
-
-        // Fast-forward time past idle timeout
-        jest.advanceTimersByTime(1100);
-        await Promise.resolve(); // Allow promises to resolve
-
-        // Connection should be closed
-        expect(mockQueue.disconnect).toHaveBeenCalled();
+        await Promise.all(Array.from({length: 20}, (_, index) =>
+            publisher.publish({messageId: String(index), payload: {index}})
+        ));
+        expect(require('amqplib').connect).toHaveBeenCalledTimes(1);
+        expect(library.getPublishedMessages('orders')).toHaveLength(20);
     });
 
-    it('should reconnect automatically when publishing after idle disconnect', async () => {
-        jest.useFakeTimers();
-
-        publisher = new ResilientEventPublisher({
-            connection: 'amqp://localhost',
-            queue: 'test-queue',
-            store,
-            instantPublish: true,
-            idleTimeoutMs: 1000
-        });
-
-        // First publish
-        const event1 = createTestEvent({ test: 'data1' });
-        await publisher.publish(event1);
-
-        expect(mockQueue.connect).toHaveBeenCalledTimes(1);
-
-        // Wait for idle timeout
-        jest.advanceTimersByTime(1100);
-        await Promise.resolve();
-
-        // Manually set connected to false to simulate disconnect
-        mockQueue.disconnect.mockImplementation(async () => {
-            (publisher as any).connected = false;
-        });
-
-        // Second publish after idle timeout
-        const event2 = createTestEvent({ test: 'data2' });
-        await publisher.publish(event2);
-
-        // Should have reconnected
-        expect(mockQueue.connect).toHaveBeenCalledTimes(2);
-    });
-
-    it('should reset idle timer on each publish', async () => {
-        jest.useFakeTimers();
-
-        publisher = new ResilientEventPublisher({
-            connection: 'amqp://localhost',
-            queue: 'test-queue',
-            store,
-            instantPublish: true,
-            idleTimeoutMs: 1000
-        });
-
-        // First publish
-        await publisher.publish(createTestEvent({ test: 'data1' }));
-        expect(publisher.isConnected()).toBe(true);
-
-        // Advance time but not past timeout
-        jest.advanceTimersByTime(800);
-
-        // Second publish resets timer
-        await publisher.publish(createTestEvent({ test: 'data2' }));
-
-        // Advance time again
-        jest.advanceTimersByTime(800);
-
-        // Connection should still be open (timer was reset)
-        expect(publisher.isConnected()).toBe(true);
-        expect(mockQueue.disconnect).not.toHaveBeenCalled();
-    });
-
-    it('should not start idle monitoring when idleTimeoutMs is 0', async () => {
-        publisher = new ResilientEventPublisher({
-            connection: 'amqp://localhost',
-            queue: 'test-queue',
-            store,
-            instantPublish: true,
-            idleTimeoutMs: 0
-        });
-
-        const event = createTestEvent({ test: 'data' });
-        await publisher.publish(event);
-
-        expect(publisher.isConnected()).toBe(true);
-
-        // Check that no timer was created
-        const timers = jest.getTimerCount();
-        expect(timers).toBe(0);
-    });
-
-    it('should clear idle timer on manual disconnect', async () => {
-        jest.useFakeTimers();
-
-        publisher = new ResilientEventPublisher({
-            connection: 'amqp://localhost',
-            queue: 'test-queue',
-            store,
-            instantPublish: true,
-            idleTimeoutMs: 5000
-        });
-
-        await publisher.publish(createTestEvent({ test: 'data' }));
-        expect(publisher.isConnected()).toBe(true);
-
-        // Manually disconnect
+    it('closes only when the owner explicitly disconnects', async () => {
+        publisher = new ResilientEventPublisher({connection: 'amqp://localhost', queue: 'orders'});
+        await publisher.publish({messageId: 'one', payload: {}});
         await publisher.disconnect();
+        expect(publisher.isConnected()).toBe(false);
+    });
 
-        // Advance time past what would have been the idle timeout
-        jest.advanceTimersByTime(6000);
-
-        // disconnect should only have been called once (manual call)
-        expect(mockQueue.disconnect).toHaveBeenCalledTimes(1);
+    it('rejects queued publications instead of reconnecting behind disconnect', async () => {
+        jest.useRealTimers();
+        publisher = new ResilientEventPublisher({
+            connection: 'amqp://localhost',
+            queue: 'orders',
+            maxConcurrentPublishes: 1,
+            shutdownTimeoutMs: 20
+        });
+        await (publisher as any).ensureConnected();
+        (publisher as any).queue.channel.setAutoConfirm(false);
+        const first = publisher.publish({messageId: 'first', payload: {}}).catch(error => error as Error);
+        await new Promise(resolve => setImmediate(resolve));
+        const waiting = publisher.publish({messageId: 'waiting', payload: {}}).catch(error => error as Error);
+        await new Promise(resolve => setImmediate(resolve));
+        await publisher.disconnect();
+        expect(await first).toBeInstanceOf(Error);
+        await expect(waiting).resolves.toEqual(expect.objectContaining({message: expect.stringContaining('disconnect')}));
+        expect(require('amqplib').connect).toHaveBeenCalledTimes(1);
+        expect(library.getPublishedMessages('orders')).toHaveLength(1);
     });
 });

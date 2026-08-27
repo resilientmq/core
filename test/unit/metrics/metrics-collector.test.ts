@@ -1,4 +1,4 @@
-import { MetricsCollector, ResilientMQMetrics } from '../../../src/metrics/metrics-collector';
+import {BufferedMetricsSink, MetricsCollector, ResilientMQMetrics} from '../../../src/metrics/metrics-collector';
 
 describe('MetricsCollector', () => {
     let collector: MetricsCollector;
@@ -197,5 +197,17 @@ describe('MetricsCollector', () => {
             expect(snap.messagesSentToDLQ).toBe(1);
             expect(snap.processingErrors).toBe(1);
         });
+    });
+});
+
+describe('BufferedMetricsSink configuration', () => {
+    const sink = {emit: jest.fn()};
+
+    it('rejects zero capacity', () => {
+        expect(() => new BufferedMetricsSink(sink, 0, 1)).toThrow('capacity');
+    });
+
+    it('rejects zero batch size', () => {
+        expect(() => new BufferedMetricsSink(sink, 1, 0)).toThrow('batch');
     });
 });

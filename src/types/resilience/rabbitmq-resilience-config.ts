@@ -1,399 +1,255 @@
 import type {Options} from 'amqplib';
+import type {MetricsSink} from '../../metrics/metrics-collector';
+import type {MessageQueue} from '../broker/message-queue';
 import type {EventMessage} from './event-message';
-import {Middleware} from './middleware';
-import {EventStore} from './event-store';
-import {MessageQueue} from '../broker/message-queue';
+import type {
+    ConsumerEventStore,
+    DistributedPublisherEventStore,
+    PublisherEventStore
+} from './event-store';
+import type {Middleware} from './middleware';
 
-/**
- * Describes a RabbitMQ exchange to be used for binding or publishing.
- */
-export type ExchangeConfig = {
-    /**
-     * Name of the exchange (must be unique in vhost).
-     */
+/** RabbitMQ exchange declaration and routing defaults. */
+export interface ExchangeConfig {
+    /** Exchange name. */
     name: string;
 
-    /**
-     * Type of exchange ('direct', 'topic', 'fanout', or 'headers').
-     */
+    /** RabbitMQ exchange type. */
     type: 'direct' | 'topic' | 'fanout' | 'headers';
 
-    /**
-     * Optional routing key used when binding queues to this exchange.
-     * NOTE: per-message routing keys should be provided on each `EventMessage.routingKey`.
-     */
+    /** Default binding or publication routing key. */
     routingKey?: string;
 
-    /**
-     * Exchange creation options such as durability or arguments.
-     */
+    /** Exchange declaration options. */
     options?: Options.AssertExchange;
-};
+}
 
-/**
- * Common configuration for a queue, with optional binding to an exchange.
- */
+/** RabbitMQ queue declaration with an optional exchange binding. */
 export interface QueueBinding {
-    /**
-     * Name of the queue to assert or bind.
-     */
+    /** Queue name. */
     queue: string;
 
-    /**
-     * AMQP queue options like durability, arguments, etc.
-     */
+    /** Queue declaration options. */
     options?: Options.AssertQueue;
 
-    /**
-     * Optional exchange associated with this queue.
-     */
+    /** Optional exchange binding. */
     exchange?: ExchangeConfig;
 }
 
-/**
- * Configuration for the retry queue, including TTL and attempt limit.
- */
+/** Retry queue declaration controlled by RabbitMQ dead-letter headers. */
 export interface RetryQueueConfig extends QueueBinding {
-    /**
-     * Time to wait before retrying (milliseconds).
-     */
+    /** Delay before RabbitMQ dead-letters a retry back to the main queue. */
     ttlMs?: number;
 
-    /**
-     * Maximum number of retry attempts before dead-lettering.
-     */
+    /** Maximum total delivery attempts, including the first delivery. */
     maxAttempts?: number;
 }
 
-/**
- * Configuration for initializing a resilient RabbitMQ consumer.
- */
-export type ResilientConsumerConfig = {
-    /**
-     * AMQP connection URI or connection parameters.
-     */
-    connection: string | Options.Connect;
+/** Cooperative context supplied to each event handler. */
+export interface EventProcessingContext {
+    /** Signal aborted on processing timeout, shutdown or connection replacement. */
+    signal: AbortSignal;
 
-    /**
-     * This configuration enables or disables the option to ignore unknown events.
-        * @default true
-     */
-    ignoreUnknownEvents?: boolean;
+    /** Current RabbitMQ delivery attempt. */
+    attempt: number;
 
-    /**
-     * Max allowed uptime before automatic reconnect (in ms).
-     */
-    maxUptimeMs?: number;
+    /** Stable hash shared by all replicas of the service. */
+    serviceId: string;
 
-    /**
-     * Delay before attempting reconnect (in ms).
-     */
-    reconnectDelayMs?: number;
+    /** Ephemeral identifier of the current process. */
+    instanceId: string;
 
-    /**
-     * Interval to check connection/channel health (in ms).
-     */
-    heartbeatIntervalMs?: number;
+    /** Unique identifier for this delivery execution. */
+    deliveryId: string;
 
-    /**
-     * Exit process if queues remain idle.
-     */
-    exitIfIdle?: boolean;
+    /** Indicates RabbitMQ redelivery. */
+    redelivered: boolean;
 
-    /**
-     * How often to check for idle state (in ms).
-     */
-    idleCheckIntervalMs?: number;
+    /** Inbox fencing token when the store supports atomic claims. */
+    fencingToken?: string | number;
+}
 
-    /**
-     * Max idle check failures before exiting.
-     */
-    maxIdleChecks?: number;
-
-    /**
-     * Queue and exchange to consume from.
-     * If additionalExchanges are provided, the queue will be bound to them as well.
-     */
-    consumeQueue: Omit<QueueBinding, 'exchange'> & { exchanges?: ExchangeConfig[] };
-
-    /**
-     * Retry queue configuration.
-     */
-    retryQueue?: RetryQueueConfig;
-
-    /**
-     * Dead-letter queue configuration.
-     */
-    deadLetterQueue?: QueueBinding;
-
-    /**
-     * Number of messages to prefetch for the consumer.
-     */
-    prefetch?: number;
-
-    /**
-     * Enables RabbitMQ single-active-consumer mode for the main consume queue.
-     *
-     * When set, this value is applied to queue arguments as
-     * `x-single-active-consumer`.
-     *
-     * - `true`: only one active consumer at a time (others stay standby)
-     * - `false`: allow normal concurrent consumer distribution
-     * - `undefined`: keep existing queue argument behavior
-     */
-    singleActiveConsumer?: boolean;
-
-    /**
-     * Prefetch used by the secondary cleanup consumer connection (only when
-     * `ignoreUnknownEvents` is enabled).
-     *
-     * - Default: 500
-     * - Set to 0 to disable cleanup consumer functionality
-     */
-    cleanupConsumerPrefetch?: number;
-
-    /**
-     * List of event types and handlers to be processed.
-     */
-    eventsToProcess: EventProcessConfig[];
-
-    /**
-     * Lifecycle hooks for event processing.
-     */
-    events?: ResilientEventHooks;
-
-    /**
-     * Middleware applied to each event.
-     */
-    middleware?: Middleware[];
-
-    /**
-     * Event store implementation for persistence. Optional: if not provided,
-     * consumer will skip persistence-related operations.
-     */
-    store?: EventStore;
-
-    /**
-     * Maximum number of retry attempts when connecting to the store.
-     * @default 3
-     */
-    storeConnectionRetries?: number;
-
-    /**
-     * Delay in milliseconds between store connection retry attempts.
-     * @default 1000
-     */
-    storeConnectionRetryDelayMs?: number;
-
-    /**
-     * When true, enables real-time metrics collection for this consumer.
-     * Access metrics via `consumer.getMetrics()`.
-     * @default false
-     */
-    metricsEnabled?: boolean;
-};
-
-/**
- * Merged configuration used internally by the consumer processor.
- */
-export type RabbitMQResilientProcessorConfig = ResilientConsumerConfig & {
-    /**
-     * A connected message broker implementation.
-     */
-    broker: MessageQueue;
-};
-
-/**
- * Defines how to handle a specific type of event message.
- */
-export type EventProcessConfig<T = any> = {
-    /**
-     * Unique type identifier (e.g., 'order.created').
-     */
+/** Handler declaration for one event type. */
+export interface EventProcessConfig<T = unknown> {
+    /** Logical event type. */
     type: string;
 
-    /**
-     * Handler function that processes the event.
-     * Receives the full event message including messageId, type, and payload.
-     */
-    handler: (event: EventMessage<T>) => Promise<void>;
-};
+    /** Processes one event with optional cooperative cancellation and fencing context. */
+    handler: (event: EventMessage<T>, context: EventProcessingContext) => Promise<void>;
+}
 
-
-export type EventControl = {
+/** Mutable control passed to the start hook. */
+export interface EventControl {
+    /** Skips the handler and acknowledges the delivery when set. */
     skipEvent: boolean;
 }
 
-/**
- * Hook callbacks triggered at various stages of event lifecycle.
- */
-export type ResilientEventHooks = {
-    /**
-     * Invoked before processing starts.
-     */
-    onEventStart?: (event: EventMessage, control: EventControl)  => void;
+/** Hooks emitted around event processing. */
+export interface ResilientEventHooks {
+    /** Runs before event processing. */
+    onEventStart?: (event: EventMessage, control: EventControl) => void;
 
-    /**
-     * Invoked after successful processing.
-     */
+    /** Runs after durable completion. */
     onSuccess?: (event: EventMessage) => void;
 
-    /**
-     * Invoked after a processing error.
-     */
+    /** Runs after a processing failure. */
     onError?: (event: EventMessage, error: Error) => void;
+}
+
+/** Configuration for a resilient RabbitMQ consumer. */
+export interface ResilientConsumerConfig {
+    /** AMQP connection URI or parameters. */
+    connection: string | Options.Connect;
+
+    /** Stable service identity used to scope inbox deduplication. */
+    serviceId?: string;
+
+    /** Queue and exchange bindings consumed by the service. */
+    consumeQueue: Omit<QueueBinding, 'exchange'> & {exchanges?: ExchangeConfig[]};
+
+    /** RabbitMQ TTL queue used for delayed retries. */
+    retryQueue?: RetryQueueConfig;
+
+    /** Final dead-letter destination. */
+    deadLetterQueue?: QueueBinding;
+
+    /** Maximum unacknowledged deliveries for this consumer channel. */
+    prefetch?: number;
+
+    /** Enables RabbitMQ single-active-consumer on the main queue. */
+    singleActiveConsumer?: boolean;
+
+    /** Event handlers keyed by logical type. */
+    eventsToProcess: EventProcessConfig[];
+
+    /** Acknowledges unknown event types when true. */
+    ignoreUnknownEvents?: boolean;
+
+    /** Lifecycle hooks. */
+    events?: ResilientEventHooks;
+
+    /** Middleware applied around handlers. */
+    middleware?: Middleware[];
+
+    /** Optional inbox store with atomic claim and fenced transition support. */
+    store?: ConsumerEventStore;
+
+    /** Maximum store health-check attempts during startup. */
+    storeConnectionRetries?: number;
+
+    /** Delay between store health-check attempts and unavailable deliveries. */
+    storeConnectionRetryDelayMs?: number;
+
+    /** Initial delay for event-driven AMQP recovery. */
+    reconnectDelayMs?: number;
+
+    /** Maximum delay for event-driven AMQP recovery. */
+    reconnectMaxDelayMs?: number;
+
+    /** Maximum handler duration before cooperative abort and message recovery. */
+    processingTimeoutMs?: number;
+
+    /** Inbox lease duration for stores with atomic claims. */
+    processingLeaseMs?: number;
+
+    /** Maximum graceful drain time before the channel is force-closed. */
+    shutdownTimeoutMs?: number;
+
+    /** Optional event-oriented metrics destination. */
+    metricsSink?: MetricsSink;
+
+    /** Enables the built-in in-memory metric collector. */
+    metricsEnabled?: boolean;
+
+}
+
+/** Runtime configuration used by the delivery processor. */
+export type RabbitMQResilientProcessorConfig = ResilientConsumerConfig & {
+    /** Connected broker transport. */
+    broker: MessageQueue;
+
+    /** Resolved stable service hash. */
+    resolvedServiceId?: string;
+
+    /** Resolved process instance identifier. */
+    instanceId?: string;
 };
 
+/** Controls one pending outbox processing pass. */
 export interface ProcessPendingEventsOptions {
-    /**
-     * Number of events to retrieve and process per batch.
-     * Default: 100
-     */
+    /** Maximum events claimed per store round trip. */
     batchSize?: number;
 
-    /**
-     * Maximum number of events to publish per second (rate limiting).
-     * Default: same as batchSize
-     */
+    /** Maximum confirmed publications started per second. */
     maxPublishesPerSecond?: number;
 
-    /**
-     * Maximum number of concurrent publish operations.
-     * Default: min(10, maxPublishesPerSecond)
-     */
+    /** Maximum simultaneous unconfirmed publications. */
     maxConcurrentPublishes?: number;
 }
 
-/**
- * Configuration for resilient event publishing.
- */
-export type ResilientPublisherConfig = {
-    /**
-     * Broker connection string or object.
-     */
+/** Shared configuration for resilient confirmed publishing and outbox processing. */
+interface ResilientPublisherBaseConfig {
+    /** AMQP connection URI or parameters. */
     connection: string | Options.Connect;
 
-    /**
-     * Queue to publish directly to (if no exchange is used).
-     */
+    /** Stable service identity used to scope outbox claims. */
+    serviceId?: string;
+
+    /** Direct queue destination when no exchange is configured. */
     queue?: string;
 
-    /**
-     * Persistent event store. Optional: publisher will skip persistence operations if omitted.
-     * When instantPublish is false, a store is REQUIRED.
-     */
-    store?: EventStore;
-
-    /**
-     * Exchange configuration for publishing.
-     */
+    /** Exchange destination. */
     exchange?: ExchangeConfig;
 
-    /**
-     * If true (default), events are published instantly to RabbitMQ.
-     * If false, events are only stored and must be sent manually via processPendingEvents()
-     * or automatically via pendingEventsCheckIntervalMs.
-     *
-     * When false, a store with getPendingEvents() method is REQUIRED.
-     * @default true
-     */
-    instantPublish?: boolean;
-
-    /**
-     * Interval in milliseconds to check for pending events and send them.
-     * Only effective when instantPublish is false.
-     * If not set or 0, automatic pending events processing is disabled.
-     * Events are sent in chronological order (oldest first).
-     */
+    /** Periodic interval for pending outbox processing. */
     pendingEventsCheckIntervalMs?: number;
 
-    /**
-     * Maximum number of retry attempts when connecting to the store.
-     * @default 3
-     */
-    storeConnectionRetries?: number;
-
-    /**
-     * Delay in milliseconds between store connection retry attempts.
-     * @default 1000
-     */
-    storeConnectionRetryDelayMs?: number;
-
-    /**
-     * Time in milliseconds of inactivity before automatically closing the connection.
-     * Set to 0 to disable automatic disconnection.
-     * @default 10000 (10 seconds)
-     */
-    idleTimeoutMs?: number;
-
-    /**
-     * When true, enables real-time metrics collection for this publisher.
-     * Access metrics via `publisher.getMetrics()`.
-     * @default false
-     */
-    metricsEnabled?: boolean;
-    
-    /**
-     * Maximum number of concurrent publish operations globally.
-     * @default 100
-     */
+    /** Maximum simultaneous unconfirmed publications. */
     maxConcurrentPublishes?: number;
-    
-    /**
-     * Maximum number of RabbitMQ connections to create in the pool.
-     * Multiple connections distribute load and improve throughput.
-     * @default 1
-     */
-    maxConnections?: number;
 
-    /**
-     * When true (default), pending/retry publishing uses a dedicated
-     * RabbitMQ connection pool separate from realtime publishing.
-     * @default true
-     */
-    separatePendingConnections?: boolean;
+    /** Maximum time to wait for each RabbitMQ confirm. */
+    confirmTimeoutMs?: number;
 
-    /**
-     * Maximum number of RabbitMQ connections for the dedicated pending/retry
-     * pool when `separatePendingConnections` is enabled.
-     * Defaults to `maxConnections`.
-     */
-    pendingMaxConnections?: number;
-    
+    /** Duration of each distributed outbox claim. */
+    outboxLeaseMs?: number;
+
+    /** Delay before a failed outbox publication becomes eligible again. */
+    outboxRetryDelayMs?: number;
+
+    /** Default pending claim batch size. */
     pendingEventsBatchSize?: number;
+
+    /** Default maximum confirmed publications per second. */
     pendingEventsMaxPublishesPerSecond?: number;
+
+    /** Default maximum simultaneous pending publications. */
     pendingEventsMaxConcurrentPublishes?: number;
 
-    /**
-     * Enables adaptive pending concurrency based on latency/error signals.
-     * @default true
-     */
-    pendingAdaptiveConcurrency?: boolean;
+    /** Maximum time to drain pending and confirmed work during disconnect. */
+    shutdownTimeoutMs?: number;
 
-    /**
-     * EWMA alpha used for adaptive pending signals.
-     * Must be > 0 and <= 1.
-     * @default 0.2
-     */
-    pendingAdaptiveEwmaAlpha?: number;
+    /** Optional event-oriented metrics destination. */
+    metricsSink?: MetricsSink;
 
-    /**
-     * Target latency (ms) used to scale pending concurrency.
-     * Defaults to a rate-derived value when omitted.
-     */
-    pendingAdaptiveTargetLatencyMs?: number;
+    /** Enables the built-in in-memory metric collector. */
+    metricsEnabled?: boolean;
 
-    /**
-     * Soft error-rate threshold (EWMA) that triggers gradual backoff.
-     * Must be between 0 and 1.
-     * @default 0.08
-     */
-    pendingAdaptiveErrorThresholdSoft?: number;
+}
 
-    /**
-     * Hard error-rate threshold (EWMA) that triggers aggressive backoff.
-     * Must be between 0 and 1, and >= soft threshold.
-     * @default 0.2
-     */
-    pendingAdaptiveErrorThresholdHard?: number;
-};
+/** Configuration for resilient confirmed publishing and outbox processing. */
+export type ResilientPublisherConfig = ResilientPublisherBaseConfig & (
+    | {
+        /** Enables distributed deferred publication. */
+        instantPublish: false;
+
+        /** Outbox store with atomic pending claims and fenced transitions. */
+        store: DistributedPublisherEventStore;
+    }
+    | {
+        /** Publishes immediately unless storeOnly is requested. */
+        instantPublish?: true;
+
+        /** Optional outbox store with idempotent enqueue and fenced transitions. */
+        store?: PublisherEventStore;
+    }
+);

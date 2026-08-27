@@ -9,6 +9,8 @@ test/
 node_modules/
 src/
 coverage/
+.jest-cache/
+test-results/
 *.log
 
 # Other configs

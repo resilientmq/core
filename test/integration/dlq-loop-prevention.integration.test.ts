@@ -1,258 +1,112 @@
-import { ResilientConsumer } from '../../src/resilience/resilient-consumer';
-import { ResilientEventPublisher } from '../../src/resilience/resilient-event-publisher';
-import { TestContainersManager } from '../utils/test-containers';
-import { EventStoreMock } from '../utils/event-store-mock';
-import { EventBuilder, ConsumerConfigBuilder, PublisherConfigBuilder } from '../utils/test-data-builders';
-import { RabbitMQHelpers } from '../utils/rabbitmq-helpers';
-import { uniqueQueueName, TEST_CONFIG } from './test-config';
+import {ResilientConsumer} from '../../src/resilience/resilient-consumer';
+import {ResilientEventPublisher} from '../../src/resilience/resilient-event-publisher';
+import {TestContainersManager} from '../utils/test-containers';
+import {EventStoreMock} from '../utils/event-store-mock';
+import {RabbitMQHelpers} from '../utils/rabbitmq-helpers';
+import {uniqueQueueName} from './test-config';
 
-/**
- * Regression tests for the infinite NACK loop bug in the hard guard path.
- *
- * The hard guard in ResilientEventConsumeProcessor.process() fires when a message
- * arrives with x-retry-count >= maxAttempts (abnormal re-delivery). Before the fix,
- * if sendToDlqOrDiscard() threw an error, it propagated to the consumer → NACK →
- * DLX → retry queue → TTL → back to main queue → hard guard fires again → infinite loop.
- *
- * The fix wraps sendToDlqOrDiscard in a try-catch so that on failure the message is
- * ACKed, breaking the loop.
- */
-describe('Integration: DLQ Loop Prevention (hard guard)', () => {
-    let containerManager: TestContainersManager;
-    let connectionUrl: string;
-    let consumer: ResilientConsumer;
-    let publisher: ResilientEventPublisher;
-    let store: EventStoreMock;
-    let publisherStore: EventStoreMock;
-    let rabbitMQHelpers: RabbitMQHelpers;
+describe('Integration: bounded broker-owned retries', () => {
+    let containers: TestContainersManager;
+    let connection: string;
+    let helpers: RabbitMQHelpers;
+    let consumer: ResilientConsumer | undefined;
+    let publisher: ResilientEventPublisher | undefined;
 
     beforeAll(async () => {
-        containerManager = new TestContainersManager();
-        await containerManager.startRabbitMQ();
-        connectionUrl = containerManager.getConnectionUrl();
-        rabbitMQHelpers = new RabbitMQHelpers(connectionUrl);
+        containers = new TestContainersManager();
+        await containers.startRabbitMQ();
+        connection = containers.getConnectionUrl();
+        helpers = new RabbitMQHelpers(connection);
     }, 60000);
 
-    afterAll(async () => {
-        await rabbitMQHelpers?.disconnect?.();
-        await containerManager.stopAll();
-    }, 30000);
-
-    beforeEach(() => {
-        store = new EventStoreMock();
-        publisherStore = new EventStoreMock();
-    });
-
     afterEach(async () => {
-        if (consumer) {
-            try {
-                await (consumer as any).queue?.disconnect();
-            } catch (error) {
-                // Ignore cleanup errors
-            }
-        }
-        if (publisher) {
-            try {
-                publisher.stopPendingEventsCheck();
-            } catch (error) {
-                // Ignore cleanup errors
-            }
-        }
-        store?.clear();
-        publisherStore?.clear();
+        await consumer?.stop();
+        await publisher?.disconnect();
+        consumer = undefined;
+        publisher = undefined;
     });
 
-    it('should ACK message (not loop) when sendToDlqOrDiscard fails in hard guard', async () => {
-        // Arrange
-        const queueName = uniqueQueueName('test.loop-prevention');
-        const retryQueueName = `${queueName}.retry`;
-        const dlqName = `${queueName}.dlq`;
-        const maxAttempts = 3;
+    afterAll(async () => {
+        await helpers.disconnect();
+        await containers.stopAll();
+    }, 30000);
 
-        // Store fails on updateEventStatus → sendToDlqOrDiscard will throw
-        // before reaching broker.publish, simulating DB outage during DLQ routing
+    it('does not trust a publisher-supplied x-retry-count header', async () => {
+        const queue = uniqueQueueName('retry-header-isolation');
+        const handler = jest.fn();
+        consumer = createConsumer(queue, handler);
+        publisher = createPublisher(queue);
+        await consumer.start();
+        await publisher.publish({
+            messageId: 'application-header',
+            type: 'known',
+            payload: {},
+            properties: {headers: {'x-retry-count': 999999}}
+        });
+        await waitUntil(() => handler.mock.calls.length === 1);
+        expect(await helpers.getMessageCount(`${queue}.dead`)).toBe(0);
+    });
+
+    it('keeps the original recoverable when the terminal store transition fails', async () => {
+        const queue = uniqueQueueName('store-failure-terminal');
+        const store = new EventStoreMock();
         store.setFailOnUpdate(true);
-
-        let handlerCallCount = 0;
-
-        const consumerConfig = new ConsumerConfigBuilder()
-            .withConnection(connectionUrl)
-            .withQueue(queueName)
-            .withStore(store)
-            .withRetryConfig(retryQueueName, 500, maxAttempts)
-            .withDeadLetterQueue(dlqName)
-            .withEventHandler('test.loop-event', async () => {
-                handlerCallCount++;
-            })
-            .build();
-
-        consumer = new ResilientConsumer(consumerConfig);
+        const handler = jest.fn().mockRejectedValue(new Error('handler failed'));
+        consumer = createConsumer(queue, handler, store);
+        publisher = createPublisher(queue);
         await consumer.start();
-        await new Promise(resolve => setTimeout(resolve, TEST_CONFIG.CONSUMER_READY_DELAY));
+        await publisher.publish({messageId: 'terminal', type: 'known', payload: {}});
+        await waitUntil(async () => await helpers.getMessageCount(`${queue}.dead`) === 1, 5000);
+        expect(handler).toHaveBeenCalledTimes(3);
+        const [message] = await helpers.peekMessages(`${queue}.dead`, 1);
+        expect(message.properties.headers['x-resilientmq-attempt']).toBe(3);
+        expect(message.properties.headers['x-death']).toEqual(expect.any(Array));
+        await consumer.stop();
+        consumer = undefined;
+        await waitUntil(async () => await helpers.getMessageCount(queue) === 1);
+        expect((await store.getEvent({messageId: 'terminal', payload: null}))?.status).toBe('PROCESSING');
+    });
 
-        // Publish a message with x-retry-count already at maxAttempts.
-        // This simulates a message that bounced back after a failed DLQ routing
-        // (the exact scenario that caused 771+ NACK cycles in production).
-        const event = new EventBuilder()
-            .withType('test.loop-event')
-            .withPayload({ test: 'loop-prevention' })
-            .withHeaders({ 'x-retry-count': maxAttempts })
-            .build();
-
-        const publisherConfig = new PublisherConfigBuilder()
-            .withConnection(connectionUrl)
-            .withQueue(queueName)
-            .withStore(publisherStore)
-            .withInstantPublish(true)
-            .build();
-
-        publisher = new ResilientEventPublisher(publisherConfig);
-
-        // Act
-        await publisher.publish(event);
-
-        // Wait long enough for multiple retry cycles if the message were looping.
-        // With 500ms TTL, 5s ≈ 10 potential loop iterations.
-        await new Promise(resolve => setTimeout(resolve, 5000));
-
-        // Assert
-        // Handler should NEVER be called: hard guard fires before handler execution
-        expect(handlerCallCount).toBe(0);
-
-        // All queues must be empty: message was ACKed by the hard guard's catch block
-        const mainQueueCount = await rabbitMQHelpers.getMessageCount(queueName);
-        const retryQueueCount = await rabbitMQHelpers.getMessageCount(retryQueueName);
-        const dlqCount = await rabbitMQHelpers.getMessageCount(dlqName);
-
-        expect(mainQueueCount).toBe(0);
-        expect(retryQueueCount).toBe(0);
-        expect(dlqCount).toBe(0); // DLQ publish never reached (store threw first)
-    }, 30000);
-
-    it('should route to DLQ correctly when hard guard sendToDlqOrDiscard succeeds', async () => {
-        // Arrange — positive control: store works, DLQ routing should succeed
-        const queueName = uniqueQueueName('test.loop-prevention.dlq-ok');
-        const retryQueueName = `${queueName}.retry`;
-        const dlqName = `${queueName}.dlq`;
-        const maxAttempts = 3;
-
-        let handlerCallCount = 0;
-
-        const consumerConfig = new ConsumerConfigBuilder()
-            .withConnection(connectionUrl)
-            .withQueue(queueName)
-            .withStore(store)
-            .withRetryConfig(retryQueueName, 500, maxAttempts)
-            .withDeadLetterQueue(dlqName)
-            .withEventHandler('test.dlq-ok-event', async () => {
-                handlerCallCount++;
-            })
-            .build();
-
-        consumer = new ResilientConsumer(consumerConfig);
+    it('keeps the original recoverable until an unavailable DLQ can confirm publication', async () => {
+        const queue = uniqueQueueName('dlq-confirm-recovery');
+        const handler = jest.fn().mockRejectedValue(new Error('handler failed'));
+        consumer = createConsumer(queue, handler);
+        publisher = createPublisher(queue);
         await consumer.start();
-        await new Promise(resolve => setTimeout(resolve, TEST_CONFIG.CONSUMER_READY_DELAY));
+        await helpers.deleteQueue(`${queue}.dead`);
+        await publisher.publish({messageId: 'recoverable', type: 'known', payload: {}});
+        await waitUntil(() => handler.mock.calls.length === 3, 5000);
+        await new Promise(resolve => setTimeout(resolve, 300));
+        expect(handler).toHaveBeenCalledTimes(3);
+        await helpers.assertQueue(`${queue}.dead`);
+        await waitUntil(async () => await helpers.getMessageCount(`${queue}.dead`) === 1, 5000);
+        expect(await helpers.getMessageCount(queue)).toBe(0);
+        expect(await helpers.getMessageCount(`${queue}.retry`)).toBe(0);
+    });
 
-        const event = new EventBuilder()
-            .withType('test.dlq-ok-event')
-            .withPayload({ test: 'dlq-routing-success' })
-            .withHeaders({ 'x-retry-count': maxAttempts })
-            .build();
+    function createConsumer(queue: string, handler: jest.Mock, store?: EventStoreMock): ResilientConsumer {
+        return new ResilientConsumer({
+            connection,
+            serviceId: 'integration-consumer',
+            consumeQueue: {queue},
+            retryQueue: {queue: `${queue}.retry`, ttlMs: 100, maxAttempts: 3},
+            deadLetterQueue: {queue: `${queue}.dead`},
+            eventsToProcess: [{type: 'known', handler}],
+            store,
+            processingTimeoutMs: 1000,
+            processingLeaseMs: 2000
+        });
+    }
 
-        const publisherConfig = new PublisherConfigBuilder()
-            .withConnection(connectionUrl)
-            .withQueue(queueName)
-            .withStore(publisherStore)
-            .withInstantPublish(true)
-            .build();
-
-        publisher = new ResilientEventPublisher(publisherConfig);
-
-        // Act
-        await publisher.publish(event);
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        // Assert
-        // Handler should NOT be called (hard guard fires before handler)
-        expect(handlerCallCount).toBe(0);
-
-        // Main and retry queues empty
-        const mainQueueCount = await rabbitMQHelpers.getMessageCount(queueName);
-        const retryQueueCount = await rabbitMQHelpers.getMessageCount(retryQueueName);
-        expect(mainQueueCount).toBe(0);
-        expect(retryQueueCount).toBe(0);
-
-        // DLQ should contain the message
-        const dlqCount = await rabbitMQHelpers.getMessageCount(dlqName);
-        expect(dlqCount).toBe(1);
-
-        // Verify DLQ message has the expected error headers
-        const dlqMessages = await rabbitMQHelpers.peekMessages(dlqName, 1);
-        expect(dlqMessages.length).toBe(1);
-        const headers = dlqMessages[0].properties.headers;
-        expect(headers['x-error-message']).toContain('Max retry attempts');
-        expect(headers['x-death-count']).toBe(maxAttempts);
-    }, 30000);
-
-    it('should not loop when multiple messages hit hard guard with store failure simultaneously', async () => {
-        // Arrange — stress scenario: several messages at once, all hitting the hard guard
-        const queueName = uniqueQueueName('test.loop-prevention.batch');
-        const retryQueueName = `${queueName}.retry`;
-        const dlqName = `${queueName}.dlq`;
-        const maxAttempts = 3;
-        const messageCount = 5;
-
-        store.setFailOnUpdate(true);
-
-        let handlerCallCount = 0;
-
-        const consumerConfig = new ConsumerConfigBuilder()
-            .withConnection(connectionUrl)
-            .withQueue(queueName)
-            .withStore(store)
-            .withRetryConfig(retryQueueName, 500, maxAttempts)
-            .withDeadLetterQueue(dlqName)
-            .withEventHandler('test.batch-loop', async () => {
-                handlerCallCount++;
-            })
-            .build();
-
-        consumer = new ResilientConsumer(consumerConfig);
-        await consumer.start();
-        await new Promise(resolve => setTimeout(resolve, TEST_CONFIG.CONSUMER_READY_DELAY));
-
-        const publisherConfig = new PublisherConfigBuilder()
-            .withConnection(connectionUrl)
-            .withQueue(queueName)
-            .withStore(publisherStore)
-            .withInstantPublish(true)
-            .build();
-
-        publisher = new ResilientEventPublisher(publisherConfig);
-
-        // Act — publish multiple messages, all with x-retry-count >= maxAttempts
-        for (let i = 0; i < messageCount; i++) {
-            const event = new EventBuilder()
-                .withType('test.batch-loop')
-                .withPayload({ index: i })
-                .withHeaders({ 'x-retry-count': maxAttempts })
-                .build();
-            await publisher.publish(event);
-        }
-
-        // Wait for all messages to be processed (or loop if buggy)
-        await new Promise(resolve => setTimeout(resolve, 6000));
-
-        // Assert
-        expect(handlerCallCount).toBe(0);
-
-        // ALL queues must be empty — every message was ACKed by the hard guard catch
-        const mainQueueCount = await rabbitMQHelpers.getMessageCount(queueName);
-        const retryQueueCount = await rabbitMQHelpers.getMessageCount(retryQueueName);
-        const dlqCount = await rabbitMQHelpers.getMessageCount(dlqName);
-
-        expect(mainQueueCount).toBe(0);
-        expect(retryQueueCount).toBe(0);
-        expect(dlqCount).toBe(0);
-    }, 30000);
+    function createPublisher(queue: string): ResilientEventPublisher {
+        return new ResilientEventPublisher({connection, queue});
+    }
 });
+
+async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 3000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await predicate())) {
+        if (Date.now() >= deadline) throw new Error('Condition was not met before timeout');
+        await new Promise(resolve => setTimeout(resolve, 25));
+    }
+}

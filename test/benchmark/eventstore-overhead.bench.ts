@@ -5,6 +5,7 @@ import { createTestEvent } from '../fixtures/events';
 import { EventStoreMock } from '../utils/event-store-mock';
 import * as fs from 'fs';
 import * as path from 'path';
+import {RabbitMQHelpers} from '../utils/rabbitmq-helpers';
 
 /**
  * Benchmark: EventStore Overhead
@@ -18,6 +19,7 @@ import * as path from 'path';
 describe('Benchmark: EventStore Overhead', () => {
     let containerManager: TestContainersManager;
     let connectionUrl: string;
+    let rabbitMQHelpers: RabbitMQHelpers;
     
     const MESSAGES_PER_TEST = 1000;
     const ITERATIONS = 3;
@@ -31,10 +33,14 @@ describe('Benchmark: EventStore Overhead', () => {
         containerManager = new TestContainersManager();
         await containerManager.startRabbitMQ();
         connectionUrl = containerManager.getConnectionUrl();
+        rabbitMQHelpers = new RabbitMQHelpers(connectionUrl);
+        await rabbitMQHelpers.assertQueue('benchmark.store.overhead.nostore');
+        await rabbitMQHelpers.assertQueue('benchmark.store.overhead.withstore');
     }, 120000);
 
     afterAll(async () => {
         // Stop containers
+        await rabbitMQHelpers.disconnect();
         await containerManager.stopAll();
         
         // Calculate averages

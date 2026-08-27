@@ -1,636 +1,175 @@
-# 🆕 Ignoring events with controlled errors
-
-You can throw the `IgnoredEventError` from an event handler to indicate that the event should be ignored and marked as successfully processed, even if the normal logic was not executed. This is useful for cases where certain events should not be retried or sent to the DLQ.
-
-```ts
-import { IgnoredEventError } from '@resilientmq/core/dist/resilience';
-
-const consumer = new ResilientConsumer({
-  // ...configuration
-  eventsToProcess: [
-    {
-      type: 'user.created',
-      handler: async (event) => {
-        if (event.payload.ignore) {
-          throw new IgnoredEventError('Event ignored by business rule');
-        }
-        // normal logic...
-      }
-    }
-  ]
-});
-```
-
-When this error is thrown, the event is marked as `DONE` and will not be retried or sent to the DLQ.
 # @resilientmq/core
 
-[![CI/CD Pipeline](https://github.com/resilientmq/core/actions/workflows/ci-cd.yml/badge.svg?branch=master)](https://github.com/resilientmq/core/actions/workflows/ci-cd.yml)
-[![npm version](https://badge.fury.io/js/@resilientmq%2Fcore.svg)](https://www.npmjs.com/package/@resilientmq/core)
-[![Node.js Version](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022%20%7C%2024%20%7C%2025-brightgreen.svg)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)](https://www.typescriptlang.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+RabbitMQ consumer and publisher runtime for TypeScript with publisher confirms, broker-owned retries, bounded recovery, inbox leases and a distributed transactional outbox.
 
-Core logic for the resilient message queue system built on top of RabbitMQ, providing middleware support, retry logic, dead-letter handling, and persistent event lifecycle management.
+## Delivery contract
 
-## Table of Contents
+- Publications resolve only after a positive RabbitMQ publisher confirm. Unroutable mandatory publications reject.
+- Consumer failures are rejected into a RabbitMQ dead-letter retry queue. RabbitMQ `x-death`, `x-delivery-count` and `x-acquired-count` headers determine the attempt.
+- The final delivery is published and confirmed in the DLQ before the original is acknowledged.
+- An atomic inbox store prevents concurrent execution and recovers expired `PROCESSING` leases with fencing tokens.
+- An atomic outbox store lets replicas share pending work without publishing every row once per replica.
+- AMQP heartbeats and connection/channel lifecycle events trigger reconnection. Shutdown cancels new deliveries, aborts active handlers and drains for a bounded time.
 
-- [📦 Installation](#-installation)
-- [📚 Purpose](#-purpose)
-- [🧩 Main Concepts](#-main-concepts)
-- [🔧 Config: ResilientConsumerConfig](#-config-resilientconsumerconfig)
-- [🔧 Config: ResilientPublisherConfig](#-config-resilientpublisherconfig)
-- [🧩 Custom Event Storage Format](#-custom-event-storage-format)
-  - [🔄 Example: Custom Storage Serializer](#-example-custom-storage-serializer)
-- [🚀 Example: Consumer](#-example-consumer)
-- [🚀 Example: Publisher](#-example-publisher)
-- [📊 Metrics](#-metrics)
-- [🧪 Testing](#-testing)
-- [👥 Contributors](#-contributors)
-- [📄 License](#-license)
+The library provides at-least-once delivery, not exactly-once external side effects. A broker confirm followed by a storage failure can cause a later duplicate. Handlers must make domain writes idempotent or commit the inbox transition and domain mutation in one database transaction.
 
-## 📦 Installation
+## Installation
 
 ```bash
 npm install @resilientmq/core
 ```
 
-Make sure to also install the core types package:
+Node.js 18 or newer is required. Public classes and types are exported from the package root.
 
-```bash
-npm install @resilientmq/types__core
-```
-
-## 📚 Purpose
-
-This package contains the **runtime logic** for publishing and consuming resilient events. It includes:
-
-- A pluggable consumer with retry + DLQ logic
-- Publisher with persist-before-send safety
-- Middleware pipeline
-- Custom logger
-- Full TypeScript support
-
-### v2.3.0 Highlights
-
-- Publisher lane isolation: realtime publish lane and pending/retry lane can run on separate RabbitMQ pools.
-- Automatic idempotent persistence path when your store implements `saveEventIfNotExists`.
-- EWMA-based adaptive pending concurrency (latency + error-rate) with configurable thresholds.
-- Expanded unit-test coverage for publisher architecture and adaptive controls.
-
----
-
-## 🧩 Main Concepts
-
-| Feature | Description |
-|--------|-------------|
-| `publish(event)` | Publishes a message safely to a queue or exchange |
-| `consume(handler)` | Starts a consumer to process incoming messages |
-| `ResilientConsumer` | Handles connection, retry, DLQ, and auto-reconnect |
-| `ResilientEventPublisher` | Publishes events with status persistence |
-| `log(level, message)` | Unified logging mechanism |
-| `Middleware` | Custom logic pipeline on message consumption |
-
----
-
-## 🔧 Config: `ResilientConsumerConfig`
-
-| Property                   | Type                        | Required | Description                        | Subtype Fields |
-|----------------------------|-----------------------------|----------|------------------------------------|----------------|
-| `connection`               | `string \| Options.Connect` | ✅ | RabbitMQ URI or connection config  | – |
-| `consumeQueue.queue`       | `string`                    | ✅ | Queue name to consume              | – |
-| `consumeQueue.options`     | `AssertQueueOptions`        | ✅ | Queue assertion options            | durable, arguments |
-| `consumeQueue.exchanges`   | `ExchangeConfig[]`          | ❌ | exchanges to bind queue to         | name, type, routingKey, options |
-| `retryQueue.queue`         | `string`                    | ❌ | Retry queue for failed messages    | – |
-| `retryQueue.options`       | `AssertQueueOptions`        | ❌ | Queue options                      | durable, arguments |
-| `retryQueue.exchange`      | `ExchangeConfig`            | ❌ | Exchange for retry routing         | name, type, routingKey, options |
-| `retryQueue.ttlMs`         | `number`                    | ❌ | Delay before retrying              | – |
-| `retryQueue.maxAttempts`   | `number`                    | ❌ | Max retries before DLQ (default 5) | – |
-| `deadLetterQueue.queue`    | `string`                    | ❌ | Final destination after retries    | – |
-| `deadLetterQueue.options`  | `AssertQueueOptions`        | ❌ | DLQ queue options                  | durable |
-| `deadLetterQueue.exchange` | `ExchangeConfig`            | ❌ | DLQ exchange                       | name, type, routingKey, options |
-| `eventsToProcess`          | `EventProcessConfig[]`      | ✅ | List of handled event types        | type, handler |
-| `store`                    | `EventStore`                | ❌ | Persistent layer for events        | saveEvent, saveEventIfNotExists (optional), getEvent, updateEventStatus, deleteEvent, getPendingEvents (optional), batchUpdateEventStatus (optional) |
-| `storeConnectionRetries`   | `number`                    | ❌ | Max retry attempts for store connection (default: 3) | – |
-| `storeConnectionRetryDelayMs` | `number`                 | ❌ | Delay between store retry attempts in ms (default: 1000) | – |
-| `cleanupConsumerPrefetch`   | `number`                    | ❌ | Prefetch for secondary cleanup connection used when `ignoreUnknownEvents` is true (default: 500, set `0` to disable) | – |
-| `middleware`               | `Middleware[]`              | ❌ | Hooks to wrap event execution      | (event, next) => Promise |
-| `maxUptimeMs`              | `number`                    | ❌ | Restart consumer after X ms        | – |
-| `exitIfIdle`               | `boolean`                   | ❌ | Exit process if idle               | – |
-| `idleCheckIntervalMs`      | `number`                    | ❌ | Time between idle checks           | – |
-| `maxIdleChecks`            | `number`                    | ❌ | How many checks until exit         | – |
-
----
-
-## 🔧 Config: `ResilientPublisherConfig`
-
-| Property | Type | Required | Description |
-|----------|------|----------|-------------|
-| `connection` | `string \| Options.Connect` | ✅ | RabbitMQ URI or config |
-| `queue` | `string` | ❌ | Target queue (direct publish) |
-| `exchange` | `ExchangeConfig` | ❌ | Exchange for fanout/direct |
-| `store` | `EventStore` | ❌* | Event metadata persistence (optional unless `instantPublish` is false) |
-| `instantPublish` | `boolean` | ❌ | If true (default), publishes immediately. If false, stores for later delivery |
-| `pendingEventsCheckIntervalMs` | `number` | ❌ | Interval to check and send pending events (ms). Only effective when `instantPublish` is false |
-| `maxConcurrentPublishes` | `number` | ❌ | Global backpressure limit for concurrent publish operations (default: `100`) |
-| `maxConnections` | `number` | ❌ | Number of RabbitMQ connections in the pool for load distribution (default: `1`) |
-| `separatePendingConnections` | `boolean` | ❌ | Use a dedicated connection pool for pending/retry publishing (default: `true`) |
-| `pendingMaxConnections` | `number` | ❌ | Connection count for pending/retry lane when separated (default: `maxConnections`) |
-| `pendingEventsBatchSize` | `number` | ❌ | Default number of pending events fetched per batch when calling `processPendingEvents()` |
-| `pendingEventsMaxPublishesPerSecond` | `number` | ❌ | Default max number of pending events dispatched per second during `processPendingEvents()` |
-| `pendingEventsMaxConcurrentPublishes` | `number` | ❌ | Default max number of pending events published in parallel during `processPendingEvents()` |
-| `pendingAdaptiveConcurrency` | `boolean` | ❌ | Enable adaptive pending concurrency control (default: `true`) |
-| `pendingAdaptiveEwmaAlpha` | `number` | ❌ | EWMA alpha for adaptive signals, range `(0,1]` (default: `0.2`) |
-| `pendingAdaptiveTargetLatencyMs` | `number` | ❌ | Optional latency target for adaptive scaling (ms) |
-| `pendingAdaptiveErrorThresholdSoft` | `number` | ❌ | Soft EWMA error-rate threshold for gradual backoff (default: `0.08`) |
-| `pendingAdaptiveErrorThresholdHard` | `number` | ❌ | Hard EWMA error-rate threshold for aggressive backoff (default: `0.2`) |
-| `storeConnectionRetries` | `number` | ❌ | Max retry attempts for store connection (default: 3) |
-| `storeConnectionRetryDelayMs` | `number` | ❌ | Delay between store retry attempts in ms (default: 1000) |
-| `metricsEnabled` | `boolean` | ❌ | Enable runtime metrics collection for the publisher |
-
-**Note**: When `instantPublish` is set to `false`, a `store` with `getPendingEvents()` method is **REQUIRED**.
-
-**Idempotency optimization**: If your store implements `saveEventIfNotExists(event): Promise<boolean>`, publisher automatically uses that single-write path; otherwise it falls back to `getEvent + saveEvent`.
-
----
-## 🧩 Custom Event Storage Format
-
-You can fully control how events are stored and retrieved by providing a `serializer` in your `EventStore` implementation.
-
-This allows you to decouple the in-memory event format from the database structure — useful for legacy systems or when mapping to existing schemas.
-
-### 🔄 Example: Custom Storage Serializer
+## Consumer
 
 ```ts
-const store: EventStore = {
-  serializer: {
-    toStorageFormat(event) {
-      return {
-        _id: event.id,
-        body: event.payload,
-        customStatus: event.status
-      };
-    },
-    fromStorageFormat(doc) {
-      return {
-        id: doc._id,
-        messageId: doc._id,
-        payload: doc.body,
-        status: doc.customStatus,
-        type: 'custom.type'
-      };
-    }
-  },
-
-  async saveEvent(event) {
-    const doc = this.serializer.toStorageFormat(event);
-    await db.insert(doc);
-  },
-
-  async getEvent(id) {
-    const doc = await db.findById(id);
-    return doc ? this.serializer.fromStorageFormat(doc) : null;
-  },
-
-  async updateEventStatus(id, status) {
-    await db.update(id, { customStatus: status });
-  },
-
-  async deleteEvent(id) {
-    await db.delete(id);
-  },
-
-  // Required for processPendingEvents() — supports optional `limit` for batched retrieval
-  async getPendingEvents(status, limit?) {
-    const query = db.find({ customStatus: status }).sort({ createdAt: 1 });
-    return limit ? query.limit(limit) : query;
-  }
-};
-```
-
----
-
-## 🚀 Example: Consumer
-
-```ts
-import { ResilientConsumer } from '@resilientmq/core';
-import mongoose from 'mongoose';
-
-const Event = mongoose.model('Event', new mongoose.Schema({ id: String }));
-const store = {
-  saveEvent: async (e) => Event.create(e),
-  getEvent: async (id) => Event.findOne({ messageId: id }),
-  updateEventStatus: async (id, status) => Event.updateOne({ messageId: id }, { status }),
-  deleteEvent: async (id) => Event.deleteOne({ messageId: id })
-};
+import {ResilientConsumer} from '@resilientmq/core';
 
 const consumer = new ResilientConsumer({
-  connection: 'amqp://localhost',
+  connection: 'amqp://guest:guest@localhost:5672',
+  serviceId: 'billing-worker',
   consumeQueue: {
-    queue: 'user.queue',
-    options: { durable: true },
+    queue: 'billing.events',
+    options: {
+      durable: true,
+      arguments: {'x-queue-type': 'quorum'}
+    },
     exchanges: [
-      { name: 'orders.events', type: 'topic', routingKey: 'order.*', options: { durable: true } },
-      { name: 'notifications.events', type: 'direct', routingKey: 'notification', options: { durable: true } }
+      {name: 'domain.events', type: 'topic', routingKey: 'invoice.*', options: {durable: true}}
     ]
   },
-  eventsToProcess: [
-    { type: 'user.created', handler: async (payload) => console.log('User created:', payload) },
-    { type: 'order.placed', handler: async (payload) => console.log('Order placed:', payload) },
-    { type: 'notification.sent', handler: async (payload) => console.log('Notification sent:', payload) }
-  ],
-  store
+  retryQueue: {
+    queue: 'billing.events.retry',
+    ttlMs: 5_000,
+    maxAttempts: 5,
+    options: {durable: true}
+  },
+  deadLetterQueue: {
+    queue: 'billing.events.dead',
+    options: {durable: true}
+  },
+  prefetch: 100,
+  processingTimeoutMs: 60_000,
+  processingLeaseMs: 90_000,
+  store: inboxStore,
+  eventsToProcess: [{
+    type: 'invoice.created',
+    handler: async (event, context) => {
+      await createInvoiceIdempotently(event.messageId, event.payload, context.signal);
+    }
+  }]
 });
 
 await consumer.start();
-```
 
----
-
-## 🚀 Example: Publisher
-
-```ts
-import { ResilientEventPublisher } from '@resilientmq/core';
-
-const publisher = new ResilientEventPublisher({
-  connection: 'amqp://localhost',
-  exchange: {
-    name: 'user.events',
-    type: 'fanout',
-    options: { durable: true }
-  },
-  maxConnections: 3  // Use 3 connections for load distribution (optional, default: 1)
-});
-
-// IMPORTANT: routingKey is now taken from each event's `routingKey` field when publishing to an exchange.
-// If the event does not include `routingKey`, the publisher will send the message with no routing key.
-// The exchange configuration no longer provides the routing key for per-message routing.
-
-await publisher.publish({
-  id: 'evt-1',
-  messageId: 'msg-1',
-  type: 'user.created',
-  payload: { name: 'Alice' },
-  status: 'PENDING_PUBLICATION',
-  // Optional per-message routing key;
-  routingKey: 'user.created'
+process.once('SIGTERM', async () => {
+  await consumer.stop();
 });
 ```
 
-### Publisher Without Store
+`serviceId` is hashed into a stable identity shared by the replicas of this logical consumer. Each process and delivery also receives an ephemeral identifier through `EventProcessingContext`. Keep `serviceId` stable across deployments that share the same inbox.
+
+`processingLeaseMs` must exceed `processingTimeoutMs`. A timeout aborts `context.signal`; handlers should stop promptly when it is aborted.
+
+## Publisher
 
 ```ts
-import { ResilientEventPublisher } from '@resilientmq/core';
+import {EventPublishStatus, ResilientEventPublisher} from '@resilientmq/core';
 
 const publisher = new ResilientEventPublisher({
-  connection: 'amqp://localhost',
+  connection: 'amqp://guest:guest@localhost:5672',
+  serviceId: 'checkout-api',
   exchange: {
-    name: 'user.events',
-    type: 'fanout',
-    options: { durable: true }
+    name: 'domain.events',
+    type: 'topic',
+    options: {durable: true}
   },
-  maxConnections: 5  // Optional: distribute load across 5 connections
+  maxConcurrentPublishes: 200,
+  confirmTimeoutMs: 10_000
 });
 
 await publisher.publish({
-  id: 'evt-2',
-  messageId: 'msg-2',
-  type: 'user.updated',
-  payload: { name: 'Bob' },
-  status: 'PENDING_PUBLICATION'
+  messageId: 'event-01J...',
+  type: 'invoice.created',
+  routingKey: 'invoice.created',
+  payload: {invoiceId: 'inv-123'},
+  status: EventPublishStatus.PENDING
 });
+
+await publisher.disconnect();
 ```
 
-### Publisher with Pending Events Processing
+The configured concurrency is the maximum number of unconfirmed publications on one long-lived confirm channel. Adding connections is not a throughput control; confirm concurrency and broker backpressure are.
+
+### Distributed outbox
 
 ```ts
-import { ResilientEventPublisher } from '@resilientmq/core';
-
 const publisher = new ResilientEventPublisher({
-  connection: 'amqp://localhost',
-  exchange: {
-    name: 'user.events',
-    type: 'fanout',
-    options: { durable: true }
-  },
-  store: myEventStore,
-  // Check for pending events every 30 seconds
-  pendingEventsCheckIntervalMs: 30000,
-  // Realtime lane pool
-  maxConnections: 3,
-  // Dedicated pending/retry lane pool (default true)
-  separatePendingConnections: true,
-  pendingMaxConnections: 2,
-  // Adaptive pending concurrency tuning (all optional)
-  pendingAdaptiveConcurrency: true,
-  pendingAdaptiveEwmaAlpha: 0.2,
-  pendingAdaptiveErrorThresholdSoft: 0.08,
-  pendingAdaptiveErrorThresholdHard: 0.2
+  connection: process.env.AMQP_URL!,
+  serviceId: 'checkout-outbox',
+  exchange: {name: 'domain.events', type: 'topic', options: {durable: true}},
+  store: outboxStore,
+  instantPublish: false,
+  pendingEventsCheckIntervalMs: 1_000,
+  outboxLeaseMs: 30_000,
+  outboxRetryDelayMs: 5_000,
+  pendingEventsBatchSize: 500,
+  pendingEventsMaxPublishesPerSecond: 2_000,
+  pendingEventsMaxConcurrentPublishes: 100
 });
 
-// Store event for later delivery (e.g., when offline)
-await publisher.publish({
-  id: 'evt-3',
-  messageId: 'msg-3',
-  type: 'user.deleted',
-  payload: { id: '123' },
-  status: 'PENDING'
-}, { storeOnly: true });
-
-// The event will be automatically sent every 30 seconds if there are pending events
-
-// Or manually process pending events
+await publisher.publish(event, {storeOnly: true});
 await publisher.processPendingEvents();
-
-// Stop periodic checks when shutting down
-publisher.stopPendingEventsCheck();
 ```
 
-**Key Features:**
-- **`storeOnly: true`**: Stores the event without sending it immediately (useful for offline scenarios)
-- **`pendingEventsCheckIntervalMs`**: Configurable interval to automatically check and send pending events
-- **`processPendingEvents()`**: Manually trigger processing of pending events
-- **`stopPendingEventsCheck()`**: Stop the periodic check for graceful shutdown
-- **`maxConnections`**: Distribute load across multiple RabbitMQ connections (round-robin)
-- **`separatePendingConnections` + `pendingMaxConnections`**: Isolate realtime vs pending/retry traffic at connection level
-- Events are processed in the order returned by your store (implement sorting there if needed)
-- Only connects pending lane when there are pending events to process
+Deferred mode requires `claimPendingEvents`, `completePublishedEvent` and `releasePublishEvent`. Multiple replicas can run the same pass because each row is atomically leased. When configured, the rate limit is shared across all batches within one process pass; omitting it applies no artificial throttle.
 
-### ⚡ Pending Events Processing with Rate Limiting (v2.1.5+)
+## Store requirements
 
-`processPendingEvents()` supports configurable rate limiting to control throughput and prevent overwhelming your RabbitMQ broker or downstream systems.
+The compatibility methods remain on the base `EventStore`, while consumer and publisher configuration types require their atomic specializations. Runtime validation also fails fast when untyped JavaScript supplies an incomplete store. Implement each operation as one database transaction or one compare-and-set statement.
 
-**Configuration options:**
+| Method | Required invariant |
+| --- | --- |
+| `claimConsumeEvent` | Insert or acquire an expired inbox lease atomically; return `completed` for terminal rows and `busy` for any live lease. |
+| `transitionConsumeEvent` | Update only when service, instance and fencing token still own the lease. |
+| `claimPendingEvents` | Select pending/expired rows with skip-locked or equivalent semantics and assign fresh fencing tokens atomically. |
+| `claimPublishEvent` | Apply the same exclusive claim to one known event. |
+| `completePublishedEvent` | Mark `PUBLISHED` only for the current fencing token. |
+| `releasePublishEvent` | Return the current claim to `PENDING` with `nextAttemptAt`. |
 
-```ts
-await publisher.processPendingEvents({
-  batchSize: 1000,                    // Number of events to retrieve per batch (default: 100)
-  maxPublishesPerSecond: 500,         // Maximum events published per second (default: same as batchSize)
-  maxConcurrentPublishes: 10          // Maximum concurrent publish operations (default: min(10, maxPublishesPerSecond))
-});
-```
+See [docs/resilience-model.md](docs/resilience-model.md) for transitions and failure behavior.
 
-**How it works:**
-1. Retrieves `batchSize` pending events from the store
-2. Publishes events using a token bucket algorithm to respect `maxPublishesPerSecond`
-3. Maintains up to `maxConcurrentPublishes` parallel operations
-4. Updates all statuses in a single batch operation
-5. Repeats until no more pending events
+## Metrics
 
-**Token Bucket Algorithm:**
-- Provides smooth, continuous rate limiting (not fixed 1-second windows)
-- Allows burst capacity while maintaining average rate
-- Refills tokens continuously based on elapsed time
+`metricsSink` receives compact facts after runtime events such as confirmed publication, retry scheduling, dead-lettering and reconnects. Sink failures never change ACK or publication behavior.
 
-**Performance characteristics:**
-- Can achieve 500-1000 msg/s with proper configuration
-- Prevents broker overload with controlled throughput
-- Batch status updates reduce database overhead by 90%
+For a remote or database-backed sink, wrap it with `BufferedMetricsSink` so I/O is performed outside the delivery/confirm path. Set `metricsEnabled: true` only when an in-process aggregate snapshot from `getMetrics()` is needed.
 
-**Important:** Events are processed in the order returned by your store. If you need chronological ordering, implement sorting in your `getPendingEvents()` method:
+## Performance
 
-```ts
-async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<EventMessage[]> {
-  const query = EventModel.find({ status }).sort({ createdAt: 1 }); // Sort by timestamp
-  return limit ? query.limit(limit).exec() : query.exec();
-}
-```
+`prefetch` limits unacknowledged deliveries; it does not create parallelism by itself. Throughput rises with prefetch only when several asynchronous handlers can overlap. A synchronous CPU-bound handler remains limited by the Node.js event loop.
 
-#### Example: Implementing `getPendingEvents` with limit
+Publishing throughput is primarily controlled by `maxConcurrentPublishes`, confirm latency, message size, routing and broker capacity. Mandatory routing and confirms are intentional correctness costs.
 
-```ts
-// MongoDB / Mongoose example
-async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<EventMessage[]> {
-  const query = EventModel.find({ status }).sort({ createdAt: 1 });
-  if (limit) {
-    query.limit(limit);
-  }
-  return query.exec();
-}
-
-// Prisma example
-async getPendingEvents(status: EventPublishStatus, limit?: number): Promise<EventMessage[]> {
-  return prisma.event.findMany({
-    where: { status },
-    orderBy: { createdAt: 'asc' },
-    ...(limit ? { take: limit } : {})
-  });
-}
-```
-
-#### 🚀 Critical: Implement Batch Status Updates (v2.1.2+)
-
-For maximum performance, you **MUST** implement the optional `batchUpdateEventStatus()` method in your `EventStore`.
-
-**Benefits:**
-- **90% reduction in database calls**: From 1000 individual updates/s to ~10 batched calls/s
-- **10-100x throughput improvement**: Process at maximum speed without database bottleneck
-- **Backward compatible**: Falls back to individual updates if not implemented
-
-```ts
-// MongoDB / Mongoose example
-async batchUpdateEventStatus(
-  updates: Array<{ event: EventMessage; status: EventPublishStatus }>
-): Promise<void> {
-  const bulkOps = updates.map(({ event, status }) => ({
-    updateOne: {
-      filter: { messageId: event.messageId },
-      update: { $set: { status } }
-    }
-  }));
-  
-  await EventModel.bulkWrite(bulkOps);
-}
-
-// Prisma example
-async batchUpdateEventStatus(
-  updates: Array<{ event: EventMessage; status: EventPublishStatus }>
-): Promise<void> {
-  await prisma.$transaction(
-    updates.map(({ event, status }) =>
-      prisma.event.update({
-        where: { messageId: event.messageId },
-        data: { status }
-      })
-    )
-  );
-}
-
-// SQL example (using Knex)
-async batchUpdateEventStatus(
-  updates: Array<{ event: EventMessage; status: EventPublishStatus }>
-): Promise<void> {
-  const trx = await db.transaction();
-  try {
-    for (const { event, status } of updates) {
-      await trx('events')
-        .where({ message_id: event.messageId })
-        .update({ status });
-    }
-    await trx.commit();
-  } catch (error) {
-    await trx.rollback();
-    throw error;
-  }
-}
-```
-
-**How it works:**
-- The publisher batches status updates every 100ms during `processPendingEvents()`
-- If `batchUpdateEventStatus()` is implemented, it's used automatically
-- If not implemented or if it fails, falls back to individual `updateEventStatus()` calls
-- No code changes needed in your publisher - just implement the method in your store
-
----
-
-## 📊 Metrics
-
-`ResilientEventPublisher` supports optional real-time metrics collection.
-Enable it with `metricsEnabled: true` in the config, then call `getMetrics()` at any time to get
-a snapshot.
-
-```ts
-import { ResilientConsumer, ResilientEventPublisher } from '@resilientmq/core';
-
-// Consumer (metrics are disabled in runtime for minimal overhead)
-const consumer = new ResilientConsumer({
-  connection: 'amqp://localhost',
-  consumeQueue: { queue: 'my.queue' },
-  eventsToProcess: [{ type: 'order.created', handler: async (e) => { /* ... */ } }],
-  metricsEnabled: true,
-});
-
-await consumer.start();
-
-// Consumer runtime returns undefined for metrics by design
-const snap = consumer.getMetrics();
-console.log(snap); // undefined
-```
-
-```ts
-// Publisher with metrics
-const publisher = new ResilientEventPublisher({
-  connection: 'amqp://localhost',
-  queue: 'my.queue',
-  metricsEnabled: true,   // <-- enable metrics
-});
-
-await publisher.publish({ messageId: 'id-1', type: 'order.created', payload: {} });
-
-const snap = publisher.getMetrics();
-console.log(snap?.messagesPublished); // 1
-```
-
-You can also use `MetricsCollector` standalone for custom instrumentation:
-
-```ts
-import { MetricsCollector } from '@resilientmq/core';
-
-const metrics = new MetricsCollector();
-metrics.increment('messagesReceived');
-metrics.recordProcessingTime(42);
-const snapshot = metrics.getSnapshot();
-metrics.reset(); // reset all counters
-```
-
-### Available Metrics
-
-| Field | Description |
-|-------|-------------|
-| `messagesReceived` | Total messages received by the consumer |
-| `messagesProcessed` | Messages successfully processed |
-| `messagesRetried` | Messages retried at least once |
-| `messagesFailed` | Messages that failed permanently |
-| `messagesSentToDLQ` | Messages sent to the Dead Letter Queue |
-| `messagesPublished` | Messages published by the publisher |
-| `processingErrors` | Total processing errors encountered |
-| `avgProcessingTimeMs` | Average processing time in milliseconds |
-| `lastActivityAt` | Timestamp of the last recorded activity |
-
-> `getMetrics()` returns `undefined` when `metricsEnabled` is not set or is `false`.
-
----
-
-## 🧪 Testing
-
-@resilientmq/core includes a comprehensive automated testing strategy to ensure reliability, performance, and quality.
-
-### Test Suite Overview
-
-| Test Type | Purpose | Execution Time | Coverage |
-|-----------|---------|----------------|----------|
-| **Unit Tests** | Fast, isolated component testing with mocks | < 30s | 70%+ code coverage (current suite at 100% for covered source set) |
-| **Integration Tests** | End-to-end testing with real RabbitMQ | < 5min | Full integration scenarios |
-| **Stress Tests** | High-volume and high-speed load testing | < 10min | Resilience validation |
-| **Benchmarks** | Performance measurement and regression detection | < 15min | Throughput & latency metrics |
-
-### Running Tests
+Run the real-broker suites with:
 
 ```bash
-# Run all tests
-npm test
-
-# Run specific test suites
-npm run test:unit              # Unit tests only
-npm run test:integration       # Integration tests (requires Docker)
-npm run test:stress           # Stress tests (requires Docker)
-npm run test:benchmark        # Performance benchmarks (requires Docker)
-
-# Run with coverage
-npm run test:coverage         # Generate coverage report
-npm run coverage:check        # Validate coverage thresholds
-
-# Quality checks
-npm run benchmark:compare     # Check for performance regressions
-npm run quality:check         # Run all quality gates
+npm run test:integration
+npm run test:stress
+npm run test:benchmark
 ```
 
-### Test Infrastructure
+## Migrating from v2
 
-- **Testcontainers**: Automatic RabbitMQ container management for integration tests
-- **Jest**: Test framework with TypeScript support
-- **Mocks & Helpers**: Comprehensive test utilities for all components
-- **Metrics Collection**: Automated performance and resource usage tracking
+- `maxConnections`, publisher pools, adaptive pending concurrency and idle connection options were removed.
+- `heartbeatIntervalMs`, `maxUptimeMs`, `exitIfIdle`, `idleCheckIntervalMs`, `maxIdleChecks` and the cleanup consumer option were removed.
+- Missing queues or unroutable exchange publications now reject instead of appearing successful.
+- Retries no longer use application-generated `x-retry-count` or fabricated `x-death` headers.
+- Deferred publishing requires fenced outbox claim methods; legacy `getPendingEvents` is not safe for replicas.
+- Any configured store now requires atomic inbox or outbox methods instead of silently degrading to replica-unsafe compatibility operations.
+- Handlers receive an `EventProcessingContext` with an `AbortSignal` and fencing identity.
 
-### CI/CD Integration
+## License
 
-All tests run automatically on:
-- Every push to main/master/develop branches
-- Every pull request
-- Matrix testing across Node.js 18, 20, 22, 24 and 25
-
-**Quality Gates:**
-- ✅ Minimum 70% code coverage
-- ✅ All tests must pass
-- ✅ Performance regression < 10%
-- ✅ Error rate under load < 1%
-
-For detailed testing documentation, see [test/README.md](test/README.md).
-
----
-
-## 👥 Contributors
-
-<!-- ALL-CONTRIBUTORS-LIST:START -->
-<table>
-  <tbody>
-    <tr>
-      <td align="center" valign="top" width="14.28%">
-        <a href="https://github.com/hector-ae21">
-          <img src="https://avatars.githubusercontent.com/u/87265357?v=4" width="100px;" alt="Hector L. Arrechea"/>
-          <br /><sub><b>Hector L. Arrechea</b></sub>
-        </a>
-        <br /><a title="Code">💻</a> <a title="Documentation">📖</a> <a title="Infra">🚇</a> <a title="Tests">⚠️</a>
-      </td>
-    </tr>
-  </tbody>
-</table>
-<!-- ALL-CONTRIBUTORS-LIST:END -->
-
----
-
-## 📄 License
-
-[MIT](LICENSE)
-
-
-
+MIT

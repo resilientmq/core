@@ -3,7 +3,6 @@ import { ResilientConsumer } from '../../src/resilience/resilient-consumer';
 import { ResilientEventPublisher } from '../../src/resilience/resilient-event-publisher';
 import { EventStoreMock } from '../utils/event-store-mock';
 import { createTestEvent } from '../fixtures/events';
-import { EventMessage } from '../../src/types';
 
 describe('Stress Test: Recovery Under Load', () => {
     let containerManager: TestContainersManager;
@@ -73,15 +72,14 @@ describe('Stress Test: Recovery Under Load', () => {
             eventsToProcess: [
                 {
                     type: 'stress.test',
-                    handler: async (event: EventMessage) => {
+                    handler: async (event, context) => {
                         totalAttempts++;
-                        
-                        const attemptCount = (event.properties?.headers?.['x-retry-count'] as number) || 0;
+
                         const currentAttempts = failedAttempts.get(event.messageId) || 0;
                         failedAttempts.set(event.messageId, currentAttempts + 1);
 
                         // Simulate random failures (20% chance) but only on first attempt
-                        if (attemptCount === 0 && Math.random() < failureRate) {
+                        if (context.attempt === 1 && Math.random() < failureRate) {
                             throw new Error(`Simulated failure for message ${event.messageId}`);
                         }
 
