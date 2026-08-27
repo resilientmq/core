@@ -376,8 +376,29 @@ jobs:
             echo "✅ New version ${{ steps.pkg.outputs.version }}"
           fi
 
-      - name: Create git tag
+      - name: Publish to NPM
+        id: npm-publish
         if: steps.version-check.outputs.exists == 'false'
+        run: |
+          set +e
+          npm publish 2>&1 | tee /tmp/npm-publish.log
+          PUBLISH_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          if [ "$PUBLISH_EXIT_CODE" -eq 0 ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -Eq "npm error 404 Not Found - PUT https://registry.npmjs.org/@resilientmq%2fcore|could not be found or you do not have permission to access it" /tmp/npm-publish.log; then
+            echo "::warning::Skipping npm publish because the configured NPM token cannot publish @resilientmq/core."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$PUBLISH_EXIT_CODE"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create git tag
+        if: steps.version-check.outputs.exists == 'false' && steps.npm-publish.outputs.published == 'true'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
@@ -392,12 +413,6 @@ jobs:
             git push https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}.git "$TAG"
             echo "✅ Tag $TAG created"
           fi
-
-      - name: Publish to NPM
-        if: steps.version-check.outputs.exists == 'false'
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   summary:
     name: CI/CD Summary
