@@ -1,49 +1,38 @@
 # GitHub Actions Workflows
 
-## ci-cd.yml — CI/CD Pipeline
+## ci-cd.yml — CI quality gate
 
-Runs on push/PR to `main`, `master`, `develop` (when `src/`, `test/`, `package.json`, `tsconfig.json`, or workflow files change).
+Runs on relevant pushes and pull requests to `main`, `master` and `develop`. It is also reusable by `release.yml` for manually pushed version tags.
 
-### Job order
+The unit and integration matrices run on Node.js 18, 20, 22, 24 and 26. Stress tests and benchmarks run on Node.js 24. A successful push to `master` or `main` creates the package version tag when it does not exist and dispatches the release workflow on that tag.
 
-```
-unit-tests ──┐
-             ├──► integration-tests ──┬──► stress-tests ──┐
-             │                        └──► benchmarks   ──┴──► build ──┬──► publish
-             │                                                          └──► summary
-```
+Before building, CI runs `npm pkg fix` against a temporary comparison. Any package metadata that npm would normalize fails the build and must be committed explicitly.
 
-| Job | Description | Node versions |
-|-----|-------------|---------------|
-| `unit-tests` | Unit tests + coverage | 18, 20, 22, 24, 26 |
-| `integration-tests` | Integration tests against RabbitMQ | 18, 20, 22, 24, 26 |
-| `stress-tests` | High-volume tests (error rate < 1%) | 24 |
-| `benchmarks` | Performance benchmarks (≥100 msg/s, ≤1000ms latency) | 24 |
-| `build` | TypeScript compilation + dist verification | 24 |
-| `publish` | Publish to npm with OIDC + create git tag | 24 |
-| `summary` | Coverage table + pipeline status in GitHub Step Summary | 24 |
+## release.yml — npm trusted publication
 
-### Publish conditions
+Runs for version tags, published GitHub releases and manual dispatches. Manual dispatch defaults to a dry run. A real publication must run from a `v*.*.*` tag matching `package.json`.
 
-`publish` runs only on push to `main`/`master` and skips if the version in `package.json` is already on npm.
-If npm rejects publish with a package-permission 404, the job now emits a warning and skips tagging for that release attempt.
+The release validates semver, the changelog entry, npm metadata, version availability, compiled exports and tarball contents. Publication uses npm trusted publishing with GitHub OIDC and provenance. Any npm failure fails the workflow; there is no token or permission-error fallback.
 
-### npm Trusted Publisher
-
-The workflow does not use long-lived npm or GitHub PAT secrets. Configure the package on npm with these Trusted Publisher values before merging a new version:
+Configure the npm package trusted publisher with these exact values:
 
 | Setting | Value |
 |---------|-------|
-| Provider | GitHub Actions |
 | Organization or user | `resilientmq` |
 | Repository | `core` |
-| Workflow filename | `ci-cd.yml` |
-| Environment | None |
+| Workflow filename | `release.yml` |
+| Environment | `npm` |
 | Allowed action | `npm publish` |
 
-The publish job requests `id-token: write`, uses npm 12.0.2 to exchange the GitHub OIDC identity, and receives automatic provenance from npm. The scoped `GITHUB_TOKEN` supplied by GitHub creates the release tag through `contents: write`.
+No `NPM_TOKEN` or `GH_PAT` repository secret is required. The GitHub repository must contain an environment named `npm`, and the npm trusted publisher must use the same environment value.
 
-### Artifacts
+To rerun a failed release after its tag already exists:
+
+```bash
+gh workflow run release.yml --ref v3.0.0 -f dry_run=false
+```
+
+## Artifacts
 
 | Artifact | Produced by | Retention |
 |----------|-------------|-----------|
@@ -53,3 +42,4 @@ The publish job requests `id-token: write`, uses npm 12.0.2 to exchange the GitH
 | `stress-results` | `stress-tests` | 30 days |
 | `benchmark-results` | `benchmarks` | 90 days |
 | `build-artifacts` | `build` | 7 days |
+| `release-dist` | `release.yml` validation | 7 days |
