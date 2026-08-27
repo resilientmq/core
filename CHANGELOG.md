@@ -60,6 +60,7 @@
 
 ### Testing
 
+- Memory leak stress checks now run with explicit garbage collection, warm up long-lived connections before the baseline and compare retained heap at deterministic message counts.
 - `145` unit tests passed with `89.70%` line and `73.70%` branch coverage.
 - `37` integration tests passed against RabbitMQ 4.3.5, including retry, DLQ, reconnection, routing, persistence and cleanup scenarios.
 - `8` stress tests passed, including `10000` confirmed publications with zero errors, `10000` unique consumptions with zero duplicates and balanced delivery across five consumers.
