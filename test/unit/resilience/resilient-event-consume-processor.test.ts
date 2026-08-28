@@ -1,5 +1,6 @@
 import {ResilientEventConsumeProcessor} from '../../../src/resilience/resilient-event-consume-processor';
 import {IgnoredEventError} from '../../../src/resilience/ignored-event-error';
+import {setLogLevel, setLogSampling, setLogTimestamps} from '../../../src/logger/logger';
 import {
     EventConsumeStatus,
     MessageQueue,
@@ -232,6 +233,206 @@ describe('ResilientEventConsumeProcessor', () => {
         await new Promise(resolve => setImmediate(resolve));
         processor.abortActive();
         await expect(processing).resolves.toBe('requeue');
+    });
+
+    describe('consumer lifecycle logging', () => {
+        let consoleError: jest.SpyInstance;
+        let consoleInfo: jest.SpyInstance;
+        let consoleLog: jest.SpyInstance;
+
+        beforeEach(() => {
+            consoleError = jest.spyOn(console, 'error').mockImplementation();
+            consoleInfo = jest.spyOn(console, 'info').mockImplementation();
+            consoleLog = jest.spyOn(console, 'log').mockImplementation();
+            setLogTimestamps(false);
+            setLogSampling({error: 1, warn: 1, info: 1, debug: 1});
+            setLogLevel('debug');
+        });
+
+        afterEach(() => {
+            setLogLevel('none');
+            setLogTimestamps(true);
+            jest.restoreAllMocks();
+        });
+
+        it('logs event consumption and durable completion at info level', async () => {
+            const processor = createProcessor({broker, store, handler: jest.fn()});
+
+            await expect(processor.processRaw(delivery({messageId: 'logged-success'}))).resolves.toBe('ack');
+
+            expect(consoleInfo).toHaveBeenCalledWith(
+                '[Consumer] Consuming event message_id=logged-success event_type=known attempt=1'
+            );
+            expect(consoleInfo).toHaveBeenCalledWith(expect.stringMatching(
+                /^\[Consumer] Event processed successfully message_id=logged-success event_type=known attempt=1 duration_ms=\d+$/
+            ));
+            expect(consoleError).not.toHaveBeenCalled();
+        });
+
+        it('does not log successful processing after losing completion fencing', async () => {
+            jest.spyOn(store, 'transitionConsumeEvent').mockResolvedValueOnce(false);
+            const processor = createProcessor({broker, store, handler: jest.fn()});
+
+            await expect(processor.processRaw(delivery({messageId: 'uncommitted-success'})))
+                .resolves.toBe('requeue');
+
+            expect(consoleInfo.mock.calls.some(call => String(call[0]).includes('Event processed successfully')))
+                .toBe(false);
+            expect(consoleLog).toHaveBeenCalledWith(
+                '[Consumer] Completion lost fencing ownership; requeuing message_id=uncommitted-success event_type=known attempt=1'
+            );
+        });
+
+        it('logs retry routing and failure details at info level', async () => {
+            const processor = createProcessor({
+                broker,
+                store,
+                handler: jest.fn().mockRejectedValue(new Error('temporary failure'))
+            });
+
+            await expect(processor.processRaw(delivery({messageId: 'logged-retry'}))).resolves.toBe('reject');
+
+            expect(consoleInfo).toHaveBeenCalledWith(
+                '[Consumer] Event scheduled for retry message_id=logged-retry event_type=known attempt=1 next_attempt=2 error_name=Error error_message="temporary failure"'
+            );
+            expect(consoleError).not.toHaveBeenCalled();
+        });
+
+        it('does not log a scheduled business retry after losing retry fencing', async () => {
+            jest.spyOn(store, 'transitionConsumeEvent').mockResolvedValueOnce(false);
+            const processor = createProcessor({
+                broker,
+                store,
+                handler: jest.fn().mockRejectedValue(new Error('temporary failure'))
+            });
+
+            await expect(processor.processRaw(delivery({messageId: 'uncommitted-retry'})))
+                .resolves.toBe('requeue');
+
+            expect(consoleInfo.mock.calls.some(call => String(call[0]).includes('Event scheduled for retry')))
+                .toBe(false);
+            expect(consoleLog).toHaveBeenCalledWith(
+                '[Consumer] Retry transition lost fencing ownership; requeuing message_id=uncommitted-retry event_type=known attempt=1'
+            );
+        });
+
+        it('logs a confirmed and durably recorded dead-letter outcome at error level', async () => {
+            const failure = new Error('permanent failure');
+            const processor = createProcessor({
+                broker,
+                store,
+                handler: jest.fn().mockRejectedValue(failure)
+            });
+
+            await expect(processor.processRaw(delivery({
+                messageId: 'logged-dead',
+                headers: {'x-death': [{queue: 'main', reason: 'rejected', count: 2}]}
+            }))).resolves.toBe('ack');
+
+            expect(consoleError).toHaveBeenCalledWith(
+                '[Consumer] Event sent to dead-letter queue message_id=logged-dead event_type=known attempt=3 queue=dead error_name=Error error_message="permanent failure"',
+                failure
+            );
+        });
+
+        it('does not report dead-letter success when its publication is unconfirmed', async () => {
+            broker.publishRaw.mockRejectedValue(new Error('confirm unavailable'));
+            const processor = createProcessor({
+                broker,
+                store,
+                handler: jest.fn().mockRejectedValue(new Error('permanent failure'))
+            });
+
+            await expect(processor.processRaw(delivery({
+                messageId: 'unconfirmed-dead',
+                headers: {'x-death': [{queue: 'main', reason: 'rejected', count: 2}]}
+            }))).resolves.toBe('reject');
+
+            expect(consoleError).toHaveBeenCalledWith(
+                '[Consumer] Failed to confirm dead-letter publication message_id=unconfirmed-dead event_type=known attempt=3 queue=dead',
+                expect.any(Error)
+            );
+            expect(consoleError.mock.calls.some(call => String(call[0]).includes('Event sent to dead-letter queue')))
+                .toBe(false);
+        });
+
+        it('does not report dead-letter success when its terminal transition loses fencing', async () => {
+            jest.spyOn(store, 'transitionConsumeEvent').mockResolvedValueOnce(false);
+            const processor = createProcessor({
+                broker,
+                store,
+                handler: jest.fn().mockRejectedValue(new Error('permanent failure'))
+            });
+
+            await expect(processor.processRaw(delivery({
+                messageId: 'uncommitted-dead',
+                headers: {'x-death': [{queue: 'main', reason: 'rejected', count: 2}]}
+            }))).resolves.toBe('requeue');
+
+            expect(broker.publishRaw).toHaveBeenCalledTimes(1);
+            expect(consoleError.mock.calls.some(call => String(call[0]).includes('Event sent to dead-letter queue')))
+                .toBe(false);
+            expect(consoleLog).toHaveBeenCalledWith(
+                '[Consumer] Terminal transition lost fencing ownership; requeuing message_id=uncommitted-dead event_type=known attempt=3'
+            );
+        });
+
+        it('logs malformed deliveries and their retry at info level', async () => {
+            const processor = createProcessor({broker, store, handler: jest.fn()});
+
+            await expect(processor.processRaw(delivery({
+                messageId: 'malformed-log',
+                content: Buffer.from('{broken')
+            }))).resolves.toBe('reject');
+
+            expect(consoleInfo).toHaveBeenCalledWith(
+                '[Consumer] Consuming event message_id=malformed-log event_type=known attempt=1'
+            );
+            expect(consoleInfo).toHaveBeenCalledWith(expect.stringContaining(
+                '[Consumer] Event scheduled for retry message_id=malformed-log event_type=known attempt=1 next_attempt=2 error_name=SyntaxError'
+            ));
+        });
+
+        it('keeps duplicate and ignored-event diagnostics at debug level', async () => {
+            await store.saveEvent({
+                messageId: 'logged-duplicate',
+                type: 'known',
+                payload: {},
+                status: EventConsumeStatus.DONE
+            });
+            const processor = createProcessor({broker, store, handler: jest.fn()});
+
+            await expect(processor.processRaw(delivery({messageId: 'logged-duplicate'}))).resolves.toBe('ack');
+            await expect(processor.processRaw(delivery({
+                messageId: 'logged-unknown',
+                type: 'unknown'
+            }))).resolves.toBe('ack');
+
+            expect(consoleLog).toHaveBeenCalledWith(
+                '[Consumer] Acknowledging completed duplicate message_id=logged-duplicate event_type=known attempt=1'
+            );
+            expect(consoleLog).toHaveBeenCalledWith(
+                '[Consumer] Ignored unknown event message_id=logged-unknown event_type=unknown attempt=1'
+            );
+        });
+
+        it('suppresses diagnostic lifecycle logs at info level', async () => {
+            setLogLevel('info');
+            await store.saveEvent({
+                messageId: 'quiet-duplicate',
+                type: 'known',
+                payload: {},
+                status: EventConsumeStatus.DONE
+            });
+            const processor = createProcessor({broker, store, handler: jest.fn()});
+
+            await expect(processor.processRaw(delivery({messageId: 'quiet-duplicate'}))).resolves.toBe('ack');
+
+            expect(consoleInfo).toHaveBeenCalledWith(
+                '[Consumer] Consuming event message_id=quiet-duplicate event_type=known attempt=1'
+            );
+            expect(consoleLog).not.toHaveBeenCalled();
+        });
     });
 });
 

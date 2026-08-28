@@ -72,6 +72,32 @@ process.once('SIGTERM', async () => {
 
 `processingLeaseMs` must exceed `processingTimeoutMs`. A timeout aborts `context.signal`; handlers should stop promptly when it is aborted.
 
+## Logging
+
+Logging is configured once through `@resilientmq/core` and applies to every Core
+consumer, publisher and connector in the process:
+
+```ts
+import {setLogLevel, setLogSampling} from '@resilientmq/core';
+
+setLogLevel('info');
+
+// Optional: emit every informational event in production.
+setLogSampling({info: 1});
+```
+
+The default level is `none`. At `info`, the consumer reports delivery start,
+durable processing success and RabbitMQ retry scheduling. Confirmed dead-letter
+outcomes and permanent failures use `error`. Claim acquisition, completed
+duplicates, active leases, ignored events, aborts and fencing conflicts are
+available only at `debug`.
+
+Consumer lifecycle messages include `message_id`, `event_type` and `attempt`.
+Success also includes `duration_ms`; retry logs include `next_attempt` and the
+failure; and dead-letter logs identify the target queue. A dead-letter success is
+never logged before both RabbitMQ publication confirmation and the terminal inbox
+transition succeed.
+
 ## Publisher
 
 ```ts
