@@ -1,3 +1,27 @@
+# [3.0.1] - 2026-08-28
+
+### Added
+
+- Added consumer lifecycle logs with stable `message_id`, event type and attempt
+  context for delivery start, successful processing, RabbitMQ retry scheduling
+  and confirmed dead-letter outcomes.
+- Added debug-only diagnostics for claims, completed duplicates, active lease
+  contention, ignored events, cooperative aborts and lost fencing ownership.
+
+### Changed
+
+- Retry outcomes are logged at `info`; confirmed and durably recorded dead-letter
+  outcomes are logged at `error`. Success logs are emitted only after the inbox
+  transition to `DONE`, so operational output does not report uncommitted results.
+
+### Testing
+
+- Added lifecycle log assertions for success, retry, malformed deliveries,
+  confirmed and unconfirmed dead-letter publication, fencing loss, duplicates,
+  ignored events and level filtering.
+- Passed `155` unit, `37` RabbitMQ integration, `8` stress and `27` benchmark
+  tests with zero npm audit vulnerabilities.
+
 # [3.0.0] - 2026-08-27
 
 ### Added

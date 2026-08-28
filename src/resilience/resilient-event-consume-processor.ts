@@ -82,21 +82,52 @@ export class ResilientEventConsumeProcessor {
         const maxAttempts = this.config.retryQueue?.maxAttempts ?? 3;
         const match = event.type ? this.eventHandlerMap.get(event.type) : undefined;
 
+        if (isLogLevelEnabled('info')) {
+            log(
+                'info',
+                `[Consumer] Consuming event message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+            );
+        }
+
         if (!match && (this.config.ignoreUnknownEvents ?? true)) {
-            if (isLogLevelEnabled('debug')) log('debug', `[Processor] Ignored unknown event ${event.messageId}`);
+            if (isLogLevelEnabled('debug')) {
+                log(
+                    'debug',
+                    `[Consumer] Ignored unknown event message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+                );
+            }
             return 'ack';
         }
 
         const claim = await this.claim(event, attempt);
         if (claim.outcome === 'completed') {
             this.emit({name: 'delivery.duplicate', messageId: event.messageId, attempt});
+            if (isLogLevelEnabled('debug')) {
+                log(
+                    'debug',
+                    `[Consumer] Acknowledging completed duplicate message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+                );
+            }
             return 'ack';
         }
         if (claim.outcome === 'busy') {
             this.emit({name: 'delivery.lease_busy', messageId: event.messageId, attempt});
             const remainingLeaseMs = Math.max(0, claim.leaseExpiresAt - Date.now());
+            if (isLogLevelEnabled('debug')) {
+                log(
+                    'debug',
+                    `[Consumer] Event lease is busy; requeuing message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt} remaining_lease_ms=${remainingLeaseMs}`
+                );
+            }
             await this.sleep(Math.min(250, Math.max(25, remainingLeaseMs)));
             return 'requeue';
+        }
+
+        if (isLogLevelEnabled('debug')) {
+            log(
+                'debug',
+                `[Consumer] Event claim acquired message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+            );
         }
 
         if (attempt > maxAttempts) {
@@ -130,25 +161,60 @@ export class ResilientEventConsumeProcessor {
             }
 
             const completed = await this.transition(event, claim, EventConsumeStatus.DONE);
-            if (!completed) return 'requeue';
+            if (!completed) {
+                if (isLogLevelEnabled('debug')) {
+                    log(
+                        'debug',
+                        `[Consumer] Completion lost fencing ownership; requeuing message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+                    );
+                }
+                return 'requeue';
+            }
             this.safeOnSuccess(event);
+            const durationMs = Date.now() - startedAt;
             this.emit({
                 name: 'consume.completed',
                 messageId: event.messageId,
                 attempt,
-                durationMs: Date.now() - startedAt
+                durationMs
             });
+            if (isLogLevelEnabled('info')) {
+                log(
+                    'info',
+                    `[Consumer] Event processed successfully message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt} duration_ms=${durationMs}`
+                );
+            }
             return 'ack';
         } catch (error) {
             const failure = this.asError(error);
             if (failure instanceof IgnoredEventError) {
                 const completed = await this.transition(event, claim, EventConsumeStatus.DONE);
-                if (!completed) return 'requeue';
+                if (!completed) {
+                    if (isLogLevelEnabled('debug')) {
+                        log(
+                            'debug',
+                            `[Consumer] Ignored event lost fencing ownership; requeuing message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+                        );
+                    }
+                    return 'requeue';
+                }
                 this.safeOnSuccess(event);
+                if (isLogLevelEnabled('debug')) {
+                    log(
+                        'debug',
+                        `[Consumer] Event ignored by handler message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt} reason=${JSON.stringify(failure.message)}`
+                    );
+                }
                 return 'ack';
             }
 
             if (failure instanceof ProcessingAbortedError) {
+                if (isLogLevelEnabled('debug')) {
+                    log(
+                        'debug',
+                        `[Consumer] Event processing aborted; requeuing message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+                    );
+                }
                 return 'requeue';
             }
 
@@ -166,12 +232,30 @@ export class ResilientEventConsumeProcessor {
             if (!(failure instanceof ProcessingTimeoutError)) {
                 try {
                     const transitioned = await this.transition(event, claim, EventConsumeStatus.RETRY, failure);
-                    if (!transitioned) return 'requeue';
+                    if (!transitioned) {
+                        if (isLogLevelEnabled('debug')) {
+                            log(
+                                'debug',
+                                `[Consumer] Retry transition lost fencing ownership; requeuing message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+                            );
+                        }
+                        return 'requeue';
+                    }
                 } catch (storeError) {
-                    log('error', `[Processor] Failed to persist retry status for ${event.messageId}`, storeError);
+                    log(
+                        'error',
+                        `[Consumer] Failed to persist retry status message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`,
+                        storeError
+                    );
                 }
             }
             this.emit({name: 'consume.retry_scheduled', messageId: event.messageId, attempt, errorName: failure.name});
+            if (isLogLevelEnabled('info')) {
+                log(
+                    'info',
+                    `[Consumer] Event scheduled for retry message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt} next_attempt=${attempt + 1} error_name=${failure.name} error_message=${JSON.stringify(failure.message)}`
+                );
+            }
             return this.retryDisposition();
         } finally {
             controller.abort();
@@ -276,14 +360,28 @@ export class ResilientEventConsumeProcessor {
         error: Error
     ): Promise<DeliveryDisposition> {
         const maxAttempts = this.config.retryQueue?.maxAttempts ?? 3;
+        const type = this.headerString(delivery.properties.type)
+            ?? this.headerString(delivery.properties.headers?.['x-event-type']);
+        if (isLogLevelEnabled('info')) {
+            log(
+                'info',
+                `[Consumer] Consuming event message_id=${messageId} event_type=${type ?? 'unknown'} attempt=${attempt}`
+            );
+        }
         if (this.config.retryQueue && attempt < maxAttempts) {
             this.emit({name: 'consume.retry_scheduled', messageId, attempt, errorName: error.name});
+            if (isLogLevelEnabled('info')) {
+                log(
+                    'info',
+                    `[Consumer] Event scheduled for retry message_id=${messageId} event_type=${type ?? 'unknown'} attempt=${attempt} next_attempt=${attempt + 1} error_name=${error.name} error_message=${JSON.stringify(error.message)}`
+                );
+            }
             return this.retryDisposition();
         }
 
         const event: EventMessage = {
             messageId,
-            type: this.headerString(delivery.properties.type),
+            type,
             payload: null,
             properties: delivery.properties,
             routingKey: delivery.routingKey || undefined
@@ -336,20 +434,49 @@ export class ResilientEventConsumeProcessor {
                     }
                 );
             } catch (publishError) {
-                log('error', `[Processor] Failed to confirm DLQ publication for ${event.messageId}`, publishError);
+                log(
+                    'error',
+                    `[Consumer] Failed to confirm dead-letter publication message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt} queue=${deadLetterQueue.queue}`,
+                    publishError
+                );
                 return this.retryDisposition();
             }
         }
 
         try {
             const transitioned = await this.transition(event, claim, EventConsumeStatus.ERROR, error);
-            if (!transitioned) return 'requeue';
+            if (!transitioned) {
+                if (isLogLevelEnabled('debug')) {
+                    log(
+                        'debug',
+                        `[Consumer] Terminal transition lost fencing ownership; requeuing message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`
+                    );
+                }
+                return 'requeue';
+            }
         } catch (storeError) {
-            log('error', `[Processor] Failed to persist terminal status for ${event.messageId}`, storeError);
+            log(
+                'error',
+                `[Consumer] Failed to persist terminal status message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt}`,
+                storeError
+            );
             return 'requeue';
         }
         this.emit({name: 'consume.failed', messageId: event.messageId, attempt, errorName: error.name});
-        if (deadLetterQueue) this.emit({name: 'consume.dead_lettered', messageId: event.messageId, attempt});
+        if (deadLetterQueue) {
+            this.emit({name: 'consume.dead_lettered', messageId: event.messageId, attempt});
+            log(
+                'error',
+                `[Consumer] Event sent to dead-letter queue message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt} queue=${deadLetterQueue.queue} error_name=${error.name} error_message=${JSON.stringify(error.message)}`,
+                error
+            );
+        } else {
+            log(
+                'error',
+                `[Consumer] Event failed permanently without a dead-letter queue message_id=${event.messageId} event_type=${event.type ?? 'unknown'} attempt=${attempt} error_name=${error.name} error_message=${JSON.stringify(error.message)}`,
+                error
+            );
+        }
         return 'ack';
     }
 
